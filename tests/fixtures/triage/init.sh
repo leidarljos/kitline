@@ -63,6 +63,13 @@ cmt 2020-01-05T00:00:00Z sq-one
 printf 'line1\nline2\n' > sq.txt
 cmt 2020-01-06T00:00:00Z sq-two
 
+# Squash-equal, and the merge is not a no-op. Label: squash-equal / rest.
+git checkout -q -b grade/squash-equal/rest "$fork"
+printf 'alpha  beta\n' > sqrest.txt
+cmt 2020-01-11T00:00:00Z sqrest-one
+printf 'alpha  beta\ngamma\n' > sqrest.txt
+cmt 2020-01-12T00:00:00Z sqrest-two
+
 git checkout -q -b grade/no-op/drop "$fork"
 printf 'x\n' > noop.txt
 cmt 2020-01-07T00:00:00Z noop-add
@@ -148,6 +155,11 @@ git checkout -q -b grade/open/space "$fork"
 printf 'branch\n' > "my file.txt"
 cmt 2021-04-01T00:00:00Z space-conflict
 
+# Conflict path has a leading ASCII space. Label: open / rebase.
+git checkout -q -b grade/open/lead "$fork"
+printf 'branch\n' > " foo.txt"
+cmt 2021-04-02T00:00:00Z lead-conflict
+
 git checkout -q main
 printf 'trunk\n' > trunk.txt
 cmt 2020-02-01T00:00:00Z trunk-moves
@@ -156,12 +168,16 @@ at 2020-02-01T00:00:02Z git cherry-pick "$rev"
 at 2020-02-01T00:00:03Z git revert --no-edit HEAD
 printf 'line1\nline2\n' > sq.txt
 cmt 2020-02-02T00:00:00Z squash-sq
+printf 'alpha beta\ngamma\n' > sqrest.txt
+cmt 2020-02-05T00:00:00Z squash-rest
 at 2020-02-02T00:00:01Z git cherry-pick "$part"
 printf 'main\n' > conflict.txt
 cmt 2020-02-03T00:00:00Z main-conflict
 at 2020-02-03T00:00:01Z git cherry-pick "$v1feat"
 printf 'main\n' > "my file.txt"
 cmt 2020-02-04T00:00:00Z main-space
+printf 'main\n' > " foo.txt"
+cmt 2020-02-06T00:00:00Z main-lead
 git tag v1 "$fork"
 
 # Orphan: no merge base with main.

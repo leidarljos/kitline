@@ -516,8 +516,8 @@ fn render(
     }
     let mut buf = String::new();
     buf.push_str("#+title: kitline triage\n");
-    buf.push_str(&format!("#+repo: {repo}\n"));
-    buf.push_str(&format!("#+trunk: {trunk}\n"));
+    buf.push_str(&format!("#+repo: {}\n", escape_cell(repo.as_bytes())));
+    buf.push_str(&format!("#+trunk: {}\n", escape_cell(trunk.as_bytes())));
     buf.push_str(&format!("#+trunk_sha: {trunk_sha}\n"));
     buf.push_str(&format!("#+snapshot: {snap}\n"));
     buf.push_str(&format!("#+version: {}\n", env!("CARGO_PKG_VERSION")));
@@ -618,9 +618,12 @@ fn parse_drops(text: &str) -> Result<(PathBuf, String, Vec<DropRow>), String> {
     for line in text.lines() {
         if let Some(rest) = line.strip_prefix("#+") {
             if let Some((key, value)) = rest.split_once(':') {
-                match key.trim() {
-                    "repo" => repo = value.trim().to_string(),
-                    "trunk" => trunk = value.trim().to_string(),
+                // The separator after the keyword is one ASCII space.
+                // Unicode whitespace in the value is part of the name.
+                let value = value.strip_prefix(' ').unwrap_or(value);
+                match key {
+                    "repo" => repo = header_text(value)?,
+                    "trunk" => trunk = header_text(value)?,
                     _ => {}
                 }
             }
@@ -722,6 +725,11 @@ fn cell_string(cell: &str) -> Result<String, String> {
     String::from_utf8(raw).map_err(|_| "plan cell is not utf-8".to_string())
 }
 
+fn header_text(value: &str) -> Result<String, String> {
+    let raw = unescape_cell(value)?;
+    String::from_utf8(raw).map_err(|_| "plan header is not utf-8".to_string())
+}
+
 fn unescape_cell(cell: &str) -> Result<Vec<u8>, String> {
     let b = cell.as_bytes();
     let mut out = Vec::with_capacity(b.len());
@@ -768,8 +776,15 @@ fn unescape_cell(cell: &str) -> Result<Vec<u8>, String> {
 
 fn escape_cell(raw: &[u8]) -> String {
     let mut out = String::with_capacity(raw.len());
+    let end = raw.len().saturating_sub(1);
     let mut i = 0;
     while i < raw.len() {
+        // Escape a leading or trailing space so cell padding can be trimmed.
+        if raw[i] == b' ' && (i == 0 || i == end) {
+            push_octal(&mut out, raw[i]);
+            i += 1;
+            continue;
+        }
         match raw[i] {
             b'\\' => {
                 out.push_str("\\\\");

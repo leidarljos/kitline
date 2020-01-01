@@ -32,16 +32,20 @@ fn git(dir: &Path, args: &[&str]) -> String {
     String::from_utf8_lossy(&out.stdout).trim().to_string()
 }
 
-fn fixture(root: &Path) -> PathBuf {
-    let repo = root.join("repo");
+fn init_at(path: &Path) {
     let script = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/triage/init.sh");
-    let out = Command::new("sh").arg(&script).arg(&repo).output().unwrap();
+    let out = Command::new("sh").arg(&script).arg(path).output().unwrap();
     assert!(
         out.status.success(),
         "fixture\n{}{}",
         String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr)
     );
+}
+
+fn fixture(root: &Path) -> PathBuf {
+    let repo = root.join("repo");
+    init_at(&repo);
     repo
 }
 
@@ -139,8 +143,14 @@ fn unescape_cell(cell: &str) -> Vec<u8> {
 
 fn escape_cell(raw: &[u8]) -> String {
     let mut out = String::with_capacity(raw.len());
+    let end = raw.len().saturating_sub(1);
     let mut i = 0;
     while i < raw.len() {
+        if raw[i] == b' ' && (i == 0 || i == end) {
+            push_octal(&mut out, raw[i]);
+            i += 1;
+            continue;
+        }
         match raw[i] {
             b'\\' => {
                 out.push_str("\\\\");
@@ -261,7 +271,13 @@ fn parse(text: &str) -> Plan {
     for line in text.lines() {
         if let Some(rest) = line.strip_prefix("#+") {
             if let Some((key, value)) = rest.split_once(':') {
-                header.insert(key.trim().to_string(), value.trim().to_string());
+                let value = value.strip_prefix(' ').unwrap_or(value);
+                let value = if key == "repo" || key == "trunk" {
+                    cell_text(value)
+                } else {
+                    value.to_string()
+                };
+                header.insert(key.to_string(), value);
             }
             continue;
         }
@@ -328,7 +344,7 @@ fn label(short: &str) -> (String, String) {
     if short == "--output=x" || short == "grade/open/dates" {
         return ("open".into(), "rest".into());
     }
-    if short == "grade/open/space" {
+    if short == "grade/open/space" || short == "grade/open/lead" {
         return ("open".into(), "rebase".into());
     }
     if short.ends_with('\u{00a0}') {
@@ -510,6 +526,26 @@ fn p21_fixture_grades_match_labels() {
         space.get("conflicts").unwrap().contains("my file.txt"),
         "{space:?}"
     );
+    let squashed = plan.rows.get("refs/heads/grade/squash-equal/rest").unwrap();
+    assert_eq!(
+        plan.section
+            .get("refs/heads/grade/squash-equal/rest")
+            .map(String::as_str),
+        Some("REST")
+    );
+    assert_eq!(
+        squashed.get("grade").map(String::as_str),
+        Some("squash-equal")
+    );
+    let lead = plan.rows.get("refs/heads/grade/open/lead").unwrap();
+    assert_eq!(
+        plan.section
+            .get("refs/heads/grade/open/lead")
+            .map(String::as_str),
+        Some("REBASE")
+    );
+    assert_eq!(lead.get("grade").map(String::as_str), Some("open"));
+    assert_eq!(lead.get("conflicts").map(String::as_str), Some(" foo.txt"));
     let orphan = plan
         .rows
         .get("refs/heads/grade/unrelated/unsorted")
@@ -653,5 +689,95 @@ fn p22_verify_fails_after_drop_moves() {
         .unwrap();
     assert_ne!(again.status.code(), Some(0));
     let err = String::from_utf8_lossy(&again.stderr);
+    assert!(err.contains("refs/heads/v1"), "{err}");
+
+    // #+trunk is main plus U+00A0, a different head from main.
+    let nbsp_trunk = format!("main{}", '\u{00a0}');
+    let trunk_repo = root.join("trunk-repo");
+    init_at(&trunk_repo);
+    let main_sha = git(&trunk_repo, &["rev-parse", "refs/heads/main"]);
+    let trunk_ref = format!("refs/heads/{nbsp_trunk}");
+    git(&trunk_repo, &["update-ref", &trunk_ref, &main_sha]);
+    let trunk_plan = root.join("trunk-plan.org");
+    let ran = Command::new(env!("CARGO_BIN_EXE_kitline"))
+        .args([
+            "triage",
+            trunk_repo.to_str().unwrap(),
+            "--trunk",
+            &nbsp_trunk,
+            "--keep",
+            "grade/keep/*",
+            "--out",
+            trunk_plan.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(
+        ran.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&ran.stderr)
+    );
+    let trunk_text = fs::read_to_string(&trunk_plan).unwrap();
+    assert_eq!(
+        parse(&trunk_text).header.get("trunk").map(String::as_str),
+        Some(nbsp_trunk.as_str())
+    );
+    let tree = git(&trunk_repo, &["rev-parse", &format!("{main_sha}^{{tree}}")]);
+    let orphan = git(&trunk_repo, &["commit-tree", &tree, "-m", "orphan"]);
+    git(&trunk_repo, &["update-ref", &trunk_ref, &orphan]);
+    assert_eq!(
+        git(&trunk_repo, &["rev-parse", "refs/heads/main"]),
+        main_sha
+    );
+    let moved_trunk = Command::new(env!("CARGO_BIN_EXE_kitline"))
+        .args(["triage", "verify", trunk_plan.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert_ne!(moved_trunk.status.code(), Some(0));
+    let err = String::from_utf8_lossy(&moved_trunk.stderr);
+    assert!(err.contains("drop does not hold"), "{err}");
+
+    // #+repo ends in U+00A0. The directory without that byte stays put.
+    let plain_dir = root.join("rdir");
+    let named_dir = root.join(format!("rdir{}", '\u{00a0}'));
+    init_at(&plain_dir);
+    init_at(&named_dir);
+    let plain_v1 = git(&plain_dir, &["rev-parse", "refs/heads/v1"]);
+    let repo_plan = root.join("repo-plan.org");
+    let ran = Command::new(env!("CARGO_BIN_EXE_kitline"))
+        .args([
+            "triage",
+            named_dir.to_str().unwrap(),
+            "--trunk",
+            "main",
+            "--keep",
+            "grade/keep/*",
+            "--out",
+            repo_plan.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(
+        ran.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&ran.stderr)
+    );
+    let repo_text = fs::read_to_string(&repo_plan).unwrap();
+    let recorded = parse(&repo_text).header.get("repo").unwrap().clone();
+    assert_eq!(
+        recorded.as_str(),
+        named_dir.canonicalize().unwrap().to_str().unwrap()
+    );
+    assert!(recorded.ends_with('\u{00a0}'), "{recorded}");
+    move_drop(&named_dir, b"refs/heads/v1");
+    assert_eq!(git(&plain_dir, &["rev-parse", "refs/heads/v1"]), plain_v1);
+    let moved_repo = Command::new(env!("CARGO_BIN_EXE_kitline"))
+        .args(["triage", "verify", repo_plan.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert_ne!(moved_repo.status.code(), Some(0));
+    let err = String::from_utf8_lossy(&moved_repo.stderr);
     assert!(err.contains("refs/heads/v1"), "{err}");
 }
