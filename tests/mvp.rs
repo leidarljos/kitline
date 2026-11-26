@@ -1527,3 +1527,172 @@ field = "supersedes"
     has(&line.report, "record edge: mid -> top");
 }
 
+#[test]
+fn step_07_patches_privacy_trailers() {
+    let root = tmp();
+    let cons = init(&root, "anneal");
+    write_file(
+        &cons,
+        "Cargo.toml",
+        "[package]\nname = \"anneal\"\nversion = \"0.1.0\"\n\n[patch.crates-io]\nmetatensor-sys = { path = \"vendor/metatensor-sys\" }\nlinkcell = { path = \"third_party/linkcell\" }\n",
+    );
+    commit_all(&cons, "patches");
+    branch_new(&cons, "keep");
+    let eon = init(&root, "eon");
+    branch_new(&eon, "fix/amsel-gate-single-lid");
+    git(&eon, &["commit", "--allow-empty", "-qm", "hold"]);
+    let out = plan(
+        &root,
+        r#"
+keep = ["metatensor-sys"]
+
+[[crate_policy]]
+crate = "metatensor-sys"
+upstream = false
+keep = true
+
+[[node]]
+id = "anneal"
+repo = "anneal"
+path = "anneal"
+base = "develop"
+branch = "keep"
+
+[[node]]
+id = "eon"
+repo = "eon"
+path = "eon"
+base = "develop"
+branch = "fix/amsel-gate-single-lid"
+land = false
+
+[[node]]
+id = "amsel-akmc"
+repo = "anneal"
+path = "anneal"
+base = "develop"
+branch = "keep"
+needs = ["eon"]
+"#,
+        &[],
+    );
+    assert_eq!(out.code, 0, "{}", out.report);
+    not_has(&out.script, "vendor/metatensor-sys");
+    not_has(&out.script, "HEAD:fix/amsel-gate-single-lid");
+    has(&out.report, "unmarked patch: linkcell");
+    has(&out.report, "edge: eon -> amsel-akmc needs");
+    not_has(&out.script, "HEAD:keep");
+
+    let root = tmp();
+    let rgmin = init(&root, "rgmin");
+    branch_new(&rgmin, "rgmin-git");
+    write_file(&rgmin, "src/lib.rs", "pub fn a() {}\n");
+    commit_all(&rgmin, "a");
+    let old = rev(&rgmin, "HEAD");
+    write_file(&rgmin, "src/lib.rs", "pub fn b() {}\n");
+    commit_all(&rgmin, "b");
+    let cons = init(&root, "rgflux");
+    write_file(
+        &cons,
+        "Cargo.toml",
+        &format!(
+            "[package]\nname = \"rgflux\"\nversion = \"0.1.0\"\n\n[patch.crates-io]\nrgmin = {{ git = \"https://github.com/lode-org/rgmin\", rev = \"{old}\" }}\n"
+        ),
+    );
+    commit_all(&cons, "patch");
+    branch_new(&cons, "bump");
+    ahead(&cons);
+    let nodes = r#"
+[[node]]
+id = "publish-rgmin"
+kind = "gate"
+gate = "publish"
+repo = "rgmin"
+path = "rgmin"
+crate = "rgmin"
+version = "0.8.0"
+
+[[node]]
+id = "rgmin"
+repo = "rgmin"
+path = "rgmin"
+base = "develop"
+branch = "rgmin-git"
+
+[[node]]
+id = "rgflux"
+repo = "rgflux"
+path = "rgflux"
+base = "develop"
+branch = "bump"
+"#;
+    let held = plan(&root, nodes, &[]);
+    assert_eq!(held.code, 0, "{}", held.report);
+    has(&held.report, "patch: rgmin");
+    not_has(&held.script, "cargo update -p rgmin");
+    not_has(&held.script, &old);
+
+    let refused = plan(
+        &root,
+        &format!("[[publish]]\ncrate = \"rgmin\"\nversion = \"0.8.0\"\n{nodes}"),
+        &[],
+    );
+    assert_eq!(refused.code, 0, "{}", refused.report);
+    has(&refused.report, "drop is not set");
+    has(&refused.report, "refused:");
+
+    let dropped = plan(
+        &root,
+        "[[publish]]\ncrate = \"rgmin\"\nversion = \"0.8.0\"\n\n[[node]]\nid = \"publish-rgmin\"\nkind = \"gate\"\ngate = \"publish\"\nrepo = \"rgmin\"\npath = \"rgmin\"\ncrate = \"rgmin\"\nversion = \"0.8.0\"\n\n[[node]]\nid = \"rgmin\"\nrepo = \"rgmin\"\npath = \"rgmin\"\nbase = \"develop\"\nbranch = \"rgmin-git\"\n\n[[node]]\nid = \"rgflux\"\nrepo = \"rgflux\"\npath = \"rgflux\"\nbase = \"develop\"\nbranch = \"bump\"\ndrop = true\n",
+        &[],
+    );
+    assert_eq!(dropped.code, 0, "{}", dropped.report);
+    has(&dropped.script, "patch\\.crates-io");
+    has(&dropped.script, "drop patch");
+    not_has(&dropped.script, &old);
+    not_has(&dropped.script, "Depends-on");
+    not_has(&dropped.script, "Co-authored-by");
+    not_has(&dropped.script, "gpgsig");
+
+    let root = tmp();
+    let amsel = init(&root, "amsel");
+    branch_new(&amsel, "fix/private-amsel");
+    git(&amsel, &["commit", "--allow-empty", "-qm", "private"]);
+    let public = init(&root, "public-kit");
+    branch_new(&public, "fix/public-amsel");
+    git(&public, &["commit", "--allow-empty", "-qm", "public"]);
+    let out = plan(
+        &root,
+        r#"
+[[node]]
+id = "amsel-private"
+repo = "amsel"
+path = "amsel"
+base = "develop"
+branch = "fix/private-amsel"
+pr = 909090
+private = true
+
+[[node]]
+id = "amsel-public"
+repo = "public-kit"
+path = "public-kit"
+base = "develop"
+branch = "fix/public-amsel"
+needs = ["amsel-private"]
+"#,
+        &[
+            "--public",
+            "--public-report",
+            root.join("public.org").to_str().unwrap(),
+        ],
+    );
+    assert_eq!(out.code, 2, "{}", out.report);
+    has(&out.report, "fix/private-amsel");
+    has(&out.report, "909090");
+    let public_txt = fs::read_to_string(root.join("public.org")).unwrap();
+    not_has(&public_txt, "fix/private-amsel");
+    not_has(&public_txt, "909090");
+    assert!(!out.script_path.exists());
+}
+
