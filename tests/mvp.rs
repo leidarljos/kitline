@@ -933,3 +933,206 @@ drop = true
     has(&dropped.script, "linkcell-exception-typeinfo.patch");
 }
 
+#[test]
+fn step_05_registry_publish() {
+    let root = tmp();
+    let repo = init(&root, "rfc9162");
+    write_file(&repo, "src/lib.rs", "pub fn x() {}\n");
+    commit_all(&repo, "lib");
+    git(&repo, &["tag", "v0.8.1"]);
+    let cons = init(&root, "eb-stack");
+    write_file(
+        &cons,
+        "Cargo.toml",
+        &cargo_pkg("eb-stack", "[dependencies]\nrfc9162 = \"=0.8.1\"\n"),
+    );
+    commit_all(&cons, "pin");
+    branch_new(&cons, "bump");
+    ahead(&cons);
+    let base = r#"
+[[node]]
+id = "publish-rfc9162"
+kind = "gate"
+gate = "publish"
+repo = "rfc9162"
+path = "rfc9162"
+crate = "rfc9162"
+version = "0.8.1"
+
+[[node]]
+id = "eb-stack"
+repo = "eb-stack"
+path = "eb-stack"
+base = "develop"
+branch = "bump"
+"#;
+    let empty = plan(&root, base, &[]);
+    assert_eq!(empty.code, 0, "{}", empty.report);
+    has(&empty.report, "tag is not a publish");
+    not_has(&empty.script, "cargo update -p rfc9162");
+
+    let recorded = plan(
+        &root,
+        &format!("[[publish]]\ncrate = \"rfc9162\"\nversion = \"0.8.1\"\n{base}"),
+        &[],
+    );
+    assert_eq!(recorded.code, 0, "{}", recorded.report);
+    has(&recorded.script, "cargo update -p rfc9162");
+
+    let root = tmp();
+    let core = init(&root, "readcon-core");
+    write_file(&core, "src/lib.rs", "pub fn x() {}\n");
+    commit_all(&core, "lib");
+    let db = init(&root, "readcon-db");
+    write_file(
+        &db,
+        "Cargo.toml",
+        &cargo_pkg("readcon-db", "[dependencies]\nreadcon-core = \"=0.23.2\"\n"),
+    );
+    commit_all(&db, "pin");
+    branch_new(&db, "bump");
+    ahead(&db);
+    let out = plan(
+        &root,
+        r#"
+[[node]]
+id = "publish-readcon-core"
+kind = "gate"
+gate = "publish"
+repo = "readcon-core"
+path = "readcon-core"
+crate = "readcon-core"
+version = "0.23.2"
+
+[[node]]
+id = "readcon-db"
+repo = "readcon-db"
+path = "readcon-db"
+base = "develop"
+branch = "bump"
+"#,
+        &[],
+    );
+    assert_eq!(out.code, 0, "{}", out.report);
+    has(
+        &out.report,
+        "edge: publish-readcon-core -> readcon-db registry",
+    );
+
+    let root = tmp();
+    let rgmin = init(&root, "rgmin");
+    write_file(&rgmin, "src/lib.rs", "pub fn x() {}\n");
+    commit_all(&rgmin, "lib");
+    let cons = init(&root, "rgflux");
+    write_file(
+        &cons,
+        "Cargo.toml",
+        &cargo_pkg("rgflux", "[dependencies]\nrgmin = \"=0.8.0\"\n"),
+    );
+    commit_all(&cons, "pin");
+    branch_new(&cons, "bump");
+    ahead(&cons);
+    let ok = root.join("ok");
+    fs::write(&ok, "#!/bin/sh\nexit 0\n").unwrap();
+    let bad = root.join("bad");
+    fs::write(&bad, "#!/bin/sh\nexit 1\n").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        for pth in [&ok, &bad] {
+            let mut p = fs::metadata(pth).unwrap().permissions();
+            p.set_mode(0o755);
+            fs::set_permissions(pth, p).unwrap();
+        }
+    }
+    let gate = r#"
+[[node]]
+id = "publish-rgmin"
+kind = "gate"
+gate = "publish"
+repo = "rgmin"
+path = "rgmin"
+crate = "rgmin"
+version = "0.8.0"
+
+[[node]]
+id = "rgflux"
+repo = "rgflux"
+path = "rgflux"
+base = "develop"
+branch = "bump"
+"#;
+    let pass = plan(
+        &root,
+        &format!("publish_check = \"{}\"\n{gate}", ok.display()),
+        &[],
+    );
+    assert_eq!(pass.code, 0, "{}", pass.report);
+    has(&pass.script, "cargo update -p rgmin");
+
+    git(&rgmin, &["tag", "v0.8.0"]);
+    let fail = plan(
+        &root,
+        &format!("publish_check = \"{}\"\n{gate}", bad.display()),
+        &[],
+    );
+    assert_eq!(fail.code, 0, "{}", fail.report);
+    has(&fail.report, "tag is not a publish");
+    not_has(&fail.script, "cargo update -p rgmin");
+
+    let root = tmp();
+    let saddle = init(&root, "rgsaddle");
+    branch_new(&saddle, "topic");
+    write_file(&saddle, "src/lib.rs", "pub fn topic() {}\n");
+    commit_all(&saddle, "topic");
+    let topic = rev(&saddle, "HEAD");
+    git(&saddle, &["tag", "v0.6.0"]);
+    let amsel = init(&root, "amsel");
+    write_file(
+        &amsel,
+        "Cargo.toml",
+        &cargo_pkg(
+            "amsel",
+            &format!("[dependencies]\nrgsaddle = {{ git = \"https://github.com/lode-org/rgsaddle\", rev = \"{topic}\" }}\n"),
+        ),
+    );
+    commit_all(&amsel, "pin");
+    branch_new(&amsel, "bump");
+    ahead(&amsel);
+    let out = plan(
+        &root,
+        r#"
+[[node]]
+id = "publish-rgsaddle"
+kind = "gate"
+gate = "publish"
+repo = "rgsaddle"
+path = "rgsaddle"
+crate = "rgsaddle"
+version = "0.6.0"
+
+[[node]]
+id = "rgsaddle-260"
+repo = "rgsaddle"
+path = "rgsaddle"
+base = "develop"
+branch = "topic"
+
+[[node]]
+id = "amsel"
+repo = "amsel"
+path = "amsel"
+base = "develop"
+branch = "bump"
+"#,
+        &[],
+    );
+    assert_eq!(out.code, 0, "{}", out.report);
+    has(&out.report, "edge: rgsaddle-260 -> amsel cargo");
+    has(&out.report, "tag is not a publish");
+    assert!(!out
+        .report
+        .lines()
+        .any(|l| l.starts_with("edge:") && l.contains("rgsaddle-260") && l.contains("registry")));
+}
+
