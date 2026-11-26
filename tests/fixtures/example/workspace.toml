@@ -1,0 +1,14 @@
+ci = "cargo test"
+
+[repos.ttech]
+path = "clones/ttech"
+
+[[node]]
+id = "ttech-land"
+repo = "ttech"
+base = "develop"
+branch = "land"
+lease_matches = "head"
+source = "bundle"
+bundle = "clones/ttech.bundle"
+open_pr = false
