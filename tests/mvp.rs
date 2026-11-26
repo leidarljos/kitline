@@ -1136,3 +1136,394 @@ branch = "bump"
         .any(|l| l.starts_with("edge:") && l.contains("rgsaddle-260") && l.contains("registry")));
 }
 
+#[test]
+fn step_06_claims_records() {
+    let root = tmp();
+    let stack = init(&root, "eb-stack");
+    write_file(
+        &stack,
+        "src/rebuild.h",
+        "#define REBUILD_SET_SCHEMA_VERSION 5\n",
+    );
+    commit_all(&stack, "schema");
+    let pipe = init(&root, "eb-pipeline");
+    write_file(&pipe, "src/pipe.h", "#define REBUILD_SET_SCHEMA 5\n");
+    commit_all(&pipe, "schema");
+    let logs = init(&root, "eb-keep-logs");
+    write_file(&logs, "src/logs.h", "schema_version = 5\n");
+    commit_all(&logs, "logs");
+    let matched = plan(
+        &root,
+        r#"
+[[node]]
+id = "eb-stack"
+repo = "eb-stack"
+path = "eb-stack"
+base = "develop"
+branch = "develop"
+
+[[node]]
+id = "eb-pipeline"
+repo = "eb-pipeline"
+path = "eb-pipeline"
+base = "develop"
+branch = "develop"
+
+[[node]]
+id = "eb-keep-logs"
+repo = "eb-keep-logs"
+path = "eb-keep-logs"
+base = "develop"
+branch = "develop"
+
+[[contract]]
+producer = "eb-stack"
+consumer = "eb-pipeline"
+compare = "exact"
+producer_path = "src/rebuild.h"
+producer_symbol = "REBUILD_SET_SCHEMA_VERSION"
+consumer_path = "src/pipe.h"
+consumer_symbol = "REBUILD_SET_SCHEMA"
+
+[[contract]]
+producer = "eb-stack"
+consumer = "eb-keep-logs"
+compare = "integer"
+"#,
+        &[],
+    );
+    assert_eq!(matched.code, 0, "{}", matched.report);
+    has(&matched.report, "ungated: eb-keep-logs");
+
+    write_file(&pipe, "src/pipe.h", "#define REBUILD_SET_SCHEMA 4\n");
+    commit_all(&pipe, "synthetic");
+    let bad = plan(
+        &root,
+        r#"
+[[node]]
+id = "eb-stack"
+repo = "eb-stack"
+path = "eb-stack"
+base = "develop"
+branch = "develop"
+
+[[node]]
+id = "eb-pipeline"
+repo = "eb-pipeline"
+path = "eb-pipeline"
+base = "develop"
+branch = "develop"
+
+[[contract]]
+producer = "eb-stack"
+consumer = "eb-pipeline"
+compare = "exact"
+producer_path = "src/rebuild.h"
+producer_symbol = "REBUILD_SET_SCHEMA_VERSION"
+consumer_path = "src/pipe.h"
+consumer_symbol = "REBUILD_SET_SCHEMA"
+label = "synthetic"
+"#,
+        &[],
+    );
+    assert_eq!(bad.code, 2, "{}", bad.report);
+    has(&bad.report, "src/rebuild.h");
+    has(&bad.report, "src/pipe.h");
+    has(&bad.report, "synthetic");
+    assert!(!bad.script_path.exists());
+
+    let root = tmp();
+    let g = init(&root, "gpridge");
+    write_file(&g, "include/abi.h", "#define GPR_C_ABI_MINOR 21\n");
+    commit_all(&g, "base");
+    branch_new(&g, "gpridge-418");
+    write_file(&g, "include/abi.h", "#define GPR_C_ABI_MINOR 22\n");
+    commit_all(&g, "22");
+    checkout(&g, "develop");
+    branch_new(&g, "gpridge-407");
+    write_file(&g, "include/abi.h", "#define GPR_C_ABI_MINOR 23\n");
+    commit_all(&g, "23");
+    let claims = r#"
+[[node]]
+id = "gpridge-418"
+repo = "gpridge"
+path = "gpridge"
+base = "develop"
+branch = "gpridge-418"
+
+[[node]]
+id = "gpridge-407"
+repo = "gpridge"
+path = "gpridge"
+base = "develop"
+branch = "gpridge-407"
+
+[[claim]]
+node = "gpridge-418"
+symbol = "GPR_C_ABI_MINOR"
+path = "include/abi.h"
+
+[[claim]]
+node = "gpridge-407"
+symbol = "GPR_C_ABI_MINOR"
+path = "include/abi.h"
+"#;
+    let ordered = plan(&root, claims, &[]);
+    assert_eq!(ordered.code, 0, "{}", ordered.report);
+    has(&ordered.report, "re-merge");
+    has(&ordered.report, "claim batch: gpridge-418 value 22");
+    has(
+        &ordered.report,
+        "claim batch: gpridge-407 value 23 re-merge",
+    );
+    not_has(&ordered.script, "GPR_C_ABI_MINOR");
+
+    checkout(&g, "develop");
+    branch_new(&g, "capnp-a");
+    write_file(&g, "include/capnp.h", "#define CAPNP_SCHEMA 6\n");
+    commit_all(&g, "a");
+    checkout(&g, "develop");
+    branch_new(&g, "capnp-b");
+    write_file(&g, "include/capnp.h", "#define CAPNP_SCHEMA 6\n");
+    commit_all(&g, "b");
+    let clash = plan(
+        &root,
+        r#"
+[[node]]
+id = "capnp-a"
+repo = "gpridge"
+path = "gpridge"
+base = "develop"
+branch = "capnp-a"
+
+[[node]]
+id = "capnp-b"
+repo = "gpridge"
+path = "gpridge"
+base = "develop"
+branch = "capnp-b"
+
+[[claim]]
+node = "capnp-a"
+symbol = "CAPNP_SCHEMA"
+path = "include/capnp.h"
+
+[[claim]]
+node = "capnp-b"
+symbol = "CAPNP_SCHEMA"
+path = "include/capnp.h"
+"#,
+        &[],
+    );
+    assert_eq!(clash.code, 2, "{}", clash.report);
+    has(&clash.report, "capnp-a");
+    has(&clash.report, "capnp-b");
+    assert!(!clash.script_path.exists());
+
+    checkout(&g, "develop");
+    write_file(&g, "include/rgmin.h", "#define RGMIN_ABI_MINOR 17\n");
+    commit_all(&g, "17");
+    branch_new(&g, "rgmin-old");
+    write_file(&g, "include/rgmin.h", "#define RGMIN_ABI_MINOR 16\n");
+    commit_all(&g, "16");
+    let taken = plan(
+        &root,
+        r#"
+[[node]]
+id = "rgmin-old"
+repo = "gpridge"
+path = "gpridge"
+base = "develop"
+branch = "rgmin-old"
+
+[[claim]]
+node = "rgmin-old"
+symbol = "RGMIN_ABI_MINOR"
+path = "include/rgmin.h"
+"#,
+        &[],
+    );
+    assert_eq!(taken.code, 0, "{}", taken.report);
+    has(&taken.report, "already on the target");
+    not_has(&taken.script, "RGMIN_ABI_MINOR");
+
+    let root = tmp();
+    let core = init(&root, "core");
+    write_file(&core, "src/lib.rs", "pub fn library_id() {}\n");
+    commit_all(&core, "base");
+    branch_new(&core, "core-ls1");
+    write_file(&core, "src/lib.rs", "pub fn library_id() { let _ = 1; }\n");
+    commit_all(&core, "break");
+    let desk = init(&root, "desktop");
+    write_file(&desk, "README", "desktop\n");
+    commit_all(&desk, "base");
+    branch_new(&desk, "desktop-wait");
+    write_file(&desk, "README", "desktop changed\n");
+    commit_all(&desk, "readme");
+    let quiet = plan(
+        &root,
+        r#"
+[[node]]
+id = "core"
+repo = "core"
+path = "core"
+base = "develop"
+branch = "core-ls1"
+
+[[node]]
+id = "desktop"
+repo = "desktop"
+path = "desktop"
+base = "develop"
+branch = "desktop-wait"
+needs = ["core"]
+
+[[contract]]
+producer = "core"
+consumer = "desktop"
+compare = "callers"
+paths = ["src/api.rs"]
+"#,
+        &[],
+    );
+    assert_eq!(quiet.code, 0, "{}", quiet.report);
+    has(&quiet.script, "HEAD:core-ls1");
+    not_has(&quiet.script, "HEAD:desktop-wait");
+
+    branch_new(&desk, "desktop-touch");
+    checkout(&desk, "desktop-touch");
+    write_file(&desk, "src/api.rs", "pub fn repin() {}\n");
+    commit_all(&desk, "touch");
+    let waiting = plan(
+        &root,
+        r#"
+[[node]]
+id = "core"
+repo = "core"
+path = "core"
+base = "develop"
+branch = "core-ls1"
+
+[[node]]
+id = "desktop"
+repo = "desktop"
+path = "desktop"
+base = "develop"
+branch = "desktop-touch"
+needs = ["core"]
+
+[[contract]]
+producer = "core"
+consumer = "desktop"
+compare = "callers"
+paths = ["src/api.rs"]
+"#,
+        &[],
+    );
+    assert_eq!(waiting.code, 0, "{}", waiting.report);
+    not_has(&waiting.script, "HEAD:desktop-touch");
+    fs::write(
+        root.join("run.toml"),
+        "[[done]]\nid = \"core\"\nlanded = true\n",
+    )
+    .unwrap();
+    let go = plan(
+        &root,
+        r#"
+[[node]]
+id = "core"
+repo = "core"
+path = "core"
+base = "develop"
+branch = "core-ls1"
+
+[[node]]
+id = "desktop"
+repo = "desktop"
+path = "desktop"
+base = "develop"
+branch = "desktop-touch"
+needs = ["core"]
+
+[[contract]]
+producer = "core"
+consumer = "desktop"
+compare = "callers"
+paths = ["src/api.rs"]
+"#,
+        &["--run", root.join("run.toml").to_str().unwrap()],
+    );
+    assert_eq!(go.code, 0, "{}", go.report);
+    has(&go.script, "HEAD:desktop-touch");
+
+    let root = tmp();
+    let readcon = init(&root, "readcon");
+    write_file(
+        &readcon,
+        "clause_coverage/writer-v5.json",
+        "{ \"supersedes\": \"referee-r1\" }\n",
+    );
+    write_file(
+        &readcon,
+        "clause_coverage/reframe-v4.json",
+        "{ \"supersedes\": \"referee-r1\" }\n",
+    );
+    commit_all(&readcon, "fork");
+    let fork = plan(
+        &root,
+        r#"
+[[node]]
+id = "readcon"
+repo = "readcon"
+path = "readcon"
+base = "develop"
+branch = "develop"
+
+[records]
+repo = "readcon"
+directory = "clause_coverage"
+field = "supersedes"
+"#,
+        &[],
+    );
+    assert_eq!(fork.code, 2, "{}", fork.report);
+    has(&fork.report, "clause_coverage/writer-v5.json");
+    has(&fork.report, "clause_coverage/reframe-v4.json");
+    assert!(!fork.script_path.exists());
+
+    let root = tmp();
+    let readcon = init(&root, "readcon");
+    write_file(&readcon, "clause_coverage/root.json", "{ }\n");
+    write_file(
+        &readcon,
+        "clause_coverage/mid.json",
+        "{ \"supersedes\": \"root\" }\n",
+    );
+    write_file(
+        &readcon,
+        "clause_coverage/top.json",
+        "{ \"supersedes\": \"mid\" }\n",
+    );
+    commit_all(&readcon, "line");
+    let line = plan(
+        &root,
+        r#"
+[[node]]
+id = "readcon"
+repo = "readcon"
+path = "readcon"
+base = "develop"
+branch = "develop"
+
+[records]
+repo = "readcon"
+directory = "clause_coverage"
+field = "supersedes"
+"#,
+        &[],
+    );
+    assert_eq!(line.code, 0, "{}", line.report);
+    has(&line.report, "record edge: root -> mid");
+    has(&line.report, "record edge: mid -> top");
+}
+
