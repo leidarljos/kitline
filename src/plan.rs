@@ -386,10 +386,17 @@ fn run_cmd(cmd: &str) -> i32 {
 
 fn abs_path(base: &Path, p: &str) -> PathBuf {
     let path = PathBuf::from(p);
-    if path.is_absolute() {
+    let joined = if path.is_absolute() {
         path
     } else {
         base.join(path)
+    };
+    if joined.is_absolute() {
+        joined
+    } else {
+        std::env::current_dir()
+            .unwrap_or_else(|_| PathBuf::from("."))
+            .join(joined)
     }
 }
 
