@@ -740,3 +740,196 @@ branch = "develop"
     not_has(&out.script, "HEAD:fixpin");
 }
 
+#[test]
+fn step_04_meson() {
+    let root = tmp();
+    let link = init(&root, "linkcell");
+    write_file(&link, "src/lib.rs", "pub fn x() {}\n");
+    commit_all(&link, "lib");
+    let (old, new) = same_tree(&link);
+    branch_new(&link, "main");
+    let seams = init(&root, "seams");
+    write_file(
+        &seams,
+        "subprojects/linkcell.wrap",
+        &format!(
+            "[wrap-git]\nurl = https://github.com/lode-org/linkcell.git\nrevision = {old}\ndepth = 1\n"
+        ),
+    );
+    write_file(
+        &seams,
+        "subprojects/eigen.wrap",
+        "[wrap-git]\nurl = https://github.com/eigen/eigen.git\nrevision = v3.4.0\n",
+    );
+    commit_all(&seams, "wraps");
+    branch_new(&seams, "bump");
+    ahead(&seams);
+    let ws = r#"
+[[node]]
+id = "linkcell"
+repo = "linkcell"
+path = "linkcell"
+base = "develop"
+branch = "main"
+
+[[node]]
+id = "seams"
+repo = "seams"
+path = "seams"
+base = "develop"
+branch = "bump"
+"#;
+    let out = plan(&root, ws, &[]);
+    assert_eq!(out.code, 0, "{}", out.report);
+    has(&out.report, "depth = 1");
+    has(&out.report, &new);
+    has(&out.script, &format!("revision = {new}"));
+    has(&out.script, "# depth = 1");
+    let on_disk = fs::read_to_string(seams.join("subprojects/linkcell.wrap")).unwrap();
+    has(&on_disk, "depth = 1");
+    assert!(!out
+        .report
+        .lines()
+        .any(|l| l.starts_with("edge:") && l.contains("eigen")));
+
+    let root = tmp();
+    let up = init(&root, "potentials-schema");
+    write_file(&up, "README", "schema\n");
+    commit_all(&up, "schema");
+    let cons = init(&root, "cpmdc");
+    let hash = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789";
+    let wrap = format!(
+        "[wrap-file]\nsource_url = https://github.com/lode-org/potentials-schema\nsource_hash = {hash}\n"
+    );
+    write_file(&cons, "subprojects/potentials.wrap", &wrap);
+    commit_all(&cons, "wrap");
+    branch_new(&cons, "bump");
+    ahead(&cons);
+    let before = fs::read(cons.join("subprojects/potentials.wrap")).unwrap();
+    let stub = root.join("hash-stub");
+    fs::write(&stub, "#!/bin/sh\nexit 0\n").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut p = fs::metadata(&stub).unwrap().permissions();
+        p.set_mode(0o755);
+        fs::set_permissions(&stub, p).unwrap();
+    }
+    let with = plan(
+        &root,
+        &format!(
+            "hash_command = \"{}\"\n\n[[node]]\nid = \"potentials-schema\"\nrepo = \"potentials-schema\"\npath = \"potentials-schema\"\nbase = \"develop\"\nbranch = \"develop\"\n\n[[node]]\nid = \"cpmdc\"\nrepo = \"cpmdc\"\npath = \"cpmdc\"\nbase = \"develop\"\nbranch = \"bump\"\n",
+            stub.display()
+        ),
+        &[],
+    );
+    assert_eq!(with.code, 0, "{}", with.report);
+    has(&with.script, "hash-stub");
+    not_has(&with.script, hash);
+
+    let without = plan(
+        &root,
+        r#"
+[[node]]
+id = "potentials-schema"
+repo = "potentials-schema"
+path = "potentials-schema"
+base = "develop"
+branch = "develop"
+
+[[node]]
+id = "cpmdc"
+repo = "cpmdc"
+path = "cpmdc"
+base = "develop"
+branch = "bump"
+"#,
+        &[],
+    );
+    assert_eq!(without.code, 0, "{}", without.report);
+    has(&without.report, "hash command is absent");
+    assert_eq!(
+        fs::read(cons.join("subprojects/potentials.wrap")).unwrap(),
+        before
+    );
+
+    let root = tmp();
+    let link = init(&root, "linkcell");
+    branch_new(&link, "fix/exception-typeinfo-r3");
+    write_file(&link, "src/lib.rs", "pub fn a() {}\n");
+    commit_all(&link, "a");
+    let old = rev(&link, "HEAD");
+    write_file(&link, "src/lib.rs", "pub fn b() {}\n");
+    commit_all(&link, "b");
+    let seams = init(&root, "seams");
+    write_file(
+        &seams,
+        "subprojects/linkcell.wrap",
+        &format!(
+            "[wrap-git]\nurl = https://github.com/lode-org/linkcell.git\nrevision = {old}\ndepth = 1\ndiff_files = linkcell-exception-typeinfo.patch\n"
+        ),
+    );
+    write_file(
+        &seams,
+        "conda/recipe.sh",
+        "patch -p1 < linkcell-exception-typeinfo.patch\n",
+    );
+    commit_all(&seams, "wrap");
+    branch_new(&seams, "bump");
+    ahead(&seams);
+    let open = plan(
+        &root,
+        r#"
+[[node]]
+id = "linkcell"
+repo = "linkcell"
+path = "linkcell"
+base = "develop"
+branch = "fix/exception-typeinfo-r3"
+
+[[node]]
+id = "seams"
+repo = "seams"
+path = "seams"
+base = "develop"
+branch = "bump"
+"#,
+        &[],
+    );
+    assert_eq!(open.code, 0, "{}", open.report);
+    has(&open.report, "subprojects/linkcell.wrap");
+    has(&open.report, "conda/recipe.sh");
+    has(&open.report, "still required");
+    not_has(&open.script, "linkcell-exception-typeinfo.patch");
+
+    fs::write(
+        root.join("run.toml"),
+        "[[done]]\nid = \"linkcell\"\nlanded = true\n",
+    )
+    .unwrap();
+    let dropped = plan(
+        &root,
+        r#"
+[[node]]
+id = "linkcell"
+repo = "linkcell"
+path = "linkcell"
+base = "develop"
+branch = "fix/exception-typeinfo-r3"
+
+[[node]]
+id = "seams"
+repo = "seams"
+path = "seams"
+base = "develop"
+branch = "bump"
+drop = true
+"#,
+        &["--run", root.join("run.toml").to_str().unwrap()],
+    );
+    assert_eq!(dropped.code, 0, "{}", dropped.report);
+    has(&dropped.script, "diff_files");
+    has(&dropped.script, "conda/recipe.sh");
+    has(&dropped.script, "linkcell-exception-typeinfo.patch");
+}
+
