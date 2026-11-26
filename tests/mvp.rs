@@ -1696,3 +1696,286 @@ needs = ["amsel-private"]
     assert!(!out.script_path.exists());
 }
 
+#[test]
+fn step_08_order_cycles_rerun() {
+    let root = tmp();
+    let zig = init(&root, "zig-common");
+    write_file(&zig, "src/root.zig", "pub const x = 1;\n");
+    commit_all(&zig, "lib");
+    let mut consumers = String::new();
+    for name in ["eb-keep-logs", "eb-staged-rebuild"] {
+        let cons = init(&root, name);
+        write_file(
+            &cons,
+            "build.zig.zon",
+            ".{\n.dependencies = .{\n.zig_common = .{ .url = \"git+https://github.com/eessi/zig-common?ref=v0.10.0\", .hash = \"1220abcd\", },\n},\n}\n",
+        );
+        commit_all(&cons, "pin");
+        branch_new(&cons, "bump");
+        ahead(&cons);
+        consumers.push_str(&format!(
+            "[[node]]\nid = \"{name}\"\nrepo = \"{name}\"\npath = \"{name}\"\nbase = \"develop\"\nbranch = \"bump\"\n\n"
+        ));
+    }
+    let ws = format!(
+        "[[node]]\nid = \"zig-v010\"\nkind = \"gate\"\ngate = \"tag\"\nrepo = \"zig-common\"\npath = \"zig-common\"\ntag = \"v0.10.0\"\n\n{consumers}"
+    );
+    let first = plan(&root, &ws, &[]);
+    assert_eq!(first.code, 0, "{}", first.report);
+    has(&first.script, "v0.10.0 is not present");
+    not_has(&first.script, "zig fetch");
+    fs::write(
+        root.join("run.toml"),
+        "[[done]]\nid = \"zig-v010\"\nlanded = true\n",
+    )
+    .unwrap();
+    let second = plan(
+        &root,
+        &ws,
+        &["--run", root.join("run.toml").to_str().unwrap()],
+    );
+    assert_eq!(second.code, 0, "{}", second.report);
+    not_has(&second.script, "is not present");
+    let keep = second.script.find("eb-keep-logs").unwrap();
+    let staged = second.script.find("eb-staged-rebuild").unwrap();
+    assert!(keep < staged, "{}", second.script);
+    has(&second.script, "zig fetch --save=zig_common");
+    has(&second.report, "unordered");
+    not_has(&second.report, "edge: eb-keep-logs -> eb-staged-rebuild");
+    not_has(&second.report, "edge: eb-staged-rebuild -> eb-keep-logs");
+
+    let root = tmp();
+    let repo = init(&root, "cycle");
+    branch_new(&repo, "left");
+    git(&repo, &["commit", "--allow-empty", "-qm", "left"]);
+    checkout(&repo, "develop");
+    branch_new(&repo, "right");
+    git(&repo, &["commit", "--allow-empty", "-qm", "right"]);
+    let cyc = plan(
+        &root,
+        r#"
+[[node]]
+id = "left"
+kind = "kit"
+repo = "cycle"
+path = "cycle"
+base = "develop"
+branch = "left"
+needs = ["right"]
+
+[[node]]
+id = "right"
+kind = "pr"
+repo = "cycle"
+path = "cycle"
+base = "develop"
+branch = "right"
+needs = ["left"]
+"#,
+        &[],
+    );
+    assert_eq!(cyc.code, 3, "{}", cyc.report);
+    has(&cyc.report, "left");
+    has(&cyc.report, "right");
+    has(&cyc.report, "kind: kit");
+    has(&cyc.report, "kind: pr");
+    assert!(!cyc.script_path.exists());
+
+    let root = tmp();
+    let up = init(&root, "lib");
+    write_file(&up, "src/lib.rs", "pub fn x() {}\n");
+    commit_all(&up, "c");
+    let sha = rev(&up, "HEAD");
+    branch_new(&up, "alpha");
+    branch_new(&up, "beta");
+    checkout(&up, "develop");
+    git(&up, &["branch", "-f", "alpha", &sha]);
+    git(&up, &["branch", "-f", "beta", &sha]);
+    git(&up, &["reset", "--hard", "HEAD~1"]);
+    let cons = init(&root, "consumer");
+    write_file(
+        &cons,
+        "Cargo.toml",
+        &cargo_pkg(
+            "consumer",
+            &format!("[dependencies]\nlib = {{ git = \"https://github.com/example/lib\", rev = \"{sha}\" }}\n"),
+        ),
+    );
+    commit_all(&cons, "pin");
+    branch_new(&cons, "bump");
+    ahead(&cons);
+    let amb = plan(
+        &root,
+        r#"
+[[node]]
+id = "alpha"
+repo = "lib"
+path = "lib"
+base = "develop"
+branch = "alpha"
+
+[[node]]
+id = "beta"
+repo = "lib"
+path = "lib"
+base = "develop"
+branch = "beta"
+
+[[node]]
+id = "consumer"
+repo = "consumer"
+path = "consumer"
+base = "develop"
+branch = "bump"
+"#,
+        &[],
+    );
+    assert_eq!(amb.code, 2, "{}", amb.report);
+    has(&amb.report, "alpha");
+    has(&amb.report, "beta");
+    assert!(!amb.script_path.exists());
+
+    let root = tmp();
+    let up = init(&root, "upstream");
+    write_file(&up, "src/lib.rs", "pub fn x() {}\n");
+    commit_all(&up, "new");
+    let (old, new) = same_tree(&up);
+    let tree = rev(&up, "HEAD^{tree}");
+    branch_new(&up, "up");
+    let cons = init(&root, "consumer");
+    write_file(
+        &cons,
+        "Cargo.toml",
+        &cargo_pkg(
+            "consumer",
+            &format!("[dependencies]\nupstream = {{ git = \"https://github.com/example/upstream\", rev = \"{old}\" }}\n"),
+        ),
+    );
+    commit_all(&cons, "pin");
+    branch_new(&cons, "bump");
+    ahead(&cons);
+    fs::write(
+        root.join("run.toml"),
+        format!("[[done]]\nid = \"upstream\"\nlanded = true\nsha = \"{new}\"\ntree = \"{tree}\"\n"),
+    )
+    .unwrap();
+    let rerun = plan(
+        &root,
+        r#"
+[[node]]
+id = "upstream"
+repo = "upstream"
+path = "upstream"
+base = "develop"
+branch = "up"
+
+[[node]]
+id = "consumer"
+repo = "consumer"
+path = "consumer"
+base = "develop"
+branch = "bump"
+"#,
+        &["--run", root.join("run.toml").to_str().unwrap()],
+    );
+    assert_eq!(rerun.code, 0, "{}", rerun.report);
+    not_has(&rerun.script, "git merge");
+    not_has(&rerun.script, "HEAD:up");
+    let bump = rerun.script.find("cargo update").unwrap();
+    if let Some(push) = rerun.script.find("git push") {
+        assert!(bump < push, "{}", rerun.script);
+    }
+
+    let root = tmp();
+    let repo = init(&root, "stack");
+    branch_new(&repo, "parent");
+    git(&repo, &["commit", "--allow-empty", "-qm", "p1"]);
+    let p1 = rev(&repo, "HEAD");
+    branch_new(&repo, "child");
+    git(&repo, &["commit", "--allow-empty", "-qm", "child"]);
+    checkout(&repo, "parent");
+    git(&repo, &["commit", "--allow-empty", "-qm", "p2"]);
+    let p2 = rev(&repo, "HEAD");
+    let restack = plan(
+        &root,
+        &format!(
+            r#"
+[[node]]
+id = "parent"
+repo = "stack"
+path = "stack"
+base = "develop"
+branch = "parent"
+
+[[node]]
+id = "child"
+repo = "stack"
+path = "stack"
+base = "parent"
+branch = "child"
+lease = "{p1}"
+lease_matches = "base"
+"#
+        ),
+        &[],
+    );
+    assert_eq!(restack.code, 0, "{}", restack.report);
+    has(&restack.report, "restack:");
+    has(&restack.report, &p1);
+    has(&restack.report, &p2);
+
+    let root = tmp();
+    let repo = init(&root, "landed");
+    branch_new(&repo, "kit");
+    git(&repo, &["commit", "--allow-empty", "-qm", "kit"]);
+    checkout(&repo, "develop");
+    git(&repo, &["merge", "--ff-only", "kit"]);
+    let landed = plan(
+        &root,
+        r#"
+[[node]]
+id = "kit"
+repo = "landed"
+path = "landed"
+base = "develop"
+branch = "kit"
+"#,
+        &[],
+    );
+    assert_eq!(landed.code, 0, "{}", landed.report);
+    has(&landed.report, "landed: yes");
+    not_has(&landed.script, "git push");
+
+    let root = tmp();
+    let bare = root.join("bare.git");
+    git(&root, &["init", "--bare", "-q", &bare.to_string_lossy()]);
+    let repo = init(&root, "repo");
+    git(&repo, &["remote", "add", "origin", &bare.to_string_lossy()]);
+    branch_new(&repo, "land");
+    git(&repo, &["commit", "--allow-empty", "-qm", "a"]);
+    git(&repo, &["push", "-q", "origin", "land"]);
+    git(&repo, &["commit", "--allow-empty", "-qm", "b"]);
+    git(&repo, &["push", "-q", "origin", "land"]);
+    git(&repo, &["reset", "--hard", "HEAD~1"]);
+    git(&repo, &["commit", "--allow-empty", "-qm", "c"]);
+    let pushed = plan(
+        &root,
+        r#"
+[[node]]
+id = "land"
+repo = "repo"
+path = "repo"
+base = "develop"
+branch = "land"
+"#,
+        &["--tickets"],
+    );
+    assert_eq!(pushed.code, 0, "{}", pushed.report);
+    assert!(pushed.script_path.exists());
+    has(&pushed.script, "git push origin HEAD:land");
+    let ran = Command::new("sh")
+        .arg(&pushed.script_path)
+        .status()
+        .unwrap();
+    assert!(!ran.success());
+}
