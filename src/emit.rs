@@ -209,7 +209,7 @@ pub fn render(rep: &Report, public: bool) -> String {
 pub fn script_of(blocks: &[Block]) -> String {
     let mut s = String::from("#!/bin/sh\nset -eu\n");
     for b in blocks {
-        s.push_str(&format!("\n# node: {}\n", b.id));
+        s.push_str(&format!("\n# node: {}\n", sh_quote(&b.id)));
         for line in &b.lines {
             s.push_str(line);
             s.push('\n');

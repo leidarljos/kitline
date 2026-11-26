@@ -226,7 +226,7 @@ tree = "{empty}"
     );
     let out = plan(&root, &ws, &[]);
     assert_eq!(out.code, 0, "{}", out.report);
-    has(&out.script, "git push origin HEAD:land");
+    has(&out.script, "git push origin HEAD:'land'");
     not_has(&out.script, "--force");
     not_has(&out.script, "--no-verify");
     not_has(&out.script, "gh pr create");
@@ -490,11 +490,11 @@ branch = "feat/md-session-nblib-r3"
         "open-505 because stacked pull request rgpot-r3 still bases on it",
     );
     has(&out.report, "cargo clippy --all-targets --all-features");
-    has(&out.script, "HEAD:feat-70");
-    has(&out.script, "HEAD:tica");
+    has(&out.script, "HEAD:'feat-70'");
+    has(&out.script, "HEAD:'tica'");
     not_has(&out.script, "fix/dev-locked-rpath-wrappers");
-    not_has(&out.script, "HEAD:old-66");
-    not_has(&out.script, "HEAD:r248");
+    not_has(&out.script, "HEAD:'old-66'");
+    not_has(&out.script, "HEAD:'r248'");
     not_has(&out.script, "gh pr close");
     not_has(&out.script, "--delete");
     not_has(&out.script, "branch -d");
@@ -574,7 +574,7 @@ branch = "bump"
     git(&zig, &["tag", "v0.10.0"]);
     let ready = plan(&root, ws, &[]);
     assert_eq!(ready.code, 0, "{}", ready.report);
-    has(&ready.script, "zig fetch --save=zig_common");
+    has(&ready.script, "zig fetch --save='zig_common'");
     not_has(&ready.script, hash);
     not_has(&ready.script, "is not present");
 
@@ -719,7 +719,7 @@ branch = "develop"
     );
     let out = plan(&root, &ws, &[]);
     assert_eq!(out.code, 0, "{}", out.report);
-    has(&out.script, "cargo update -p ridley-core");
+    has(&out.script, "cargo update -p 'ridley-core'");
     has(&out.script, &new);
     let add = out
         .script
@@ -735,9 +735,9 @@ branch = "develop"
     has(&out.report, "companions disagree");
     has(&out.report, "pin sha absent");
     has(&out.report, "fix sha");
-    not_has(&out.script, "HEAD:bad");
-    not_has(&out.script, "HEAD:missing");
-    not_has(&out.script, "HEAD:fixpin");
+    not_has(&out.script, "HEAD:'bad'");
+    not_has(&out.script, "HEAD:'missing'");
+    not_has(&out.script, "HEAD:'fixpin'");
 }
 
 #[test]
@@ -784,7 +784,7 @@ branch = "bump"
     has(&out.report, "depth = 1");
     has(&out.report, &new);
     has(&out.script, &format!("revision = {new}"));
-    has(&out.script, "# depth = 1");
+    has(&out.script, "# depth = '1'");
     let on_disk = fs::read_to_string(seams.join("subprojects/linkcell.wrap")).unwrap();
     has(&on_disk, "depth = 1");
     assert!(!out
@@ -969,7 +969,7 @@ branch = "bump"
     let empty = plan(&root, base, &[]);
     assert_eq!(empty.code, 0, "{}", empty.report);
     has(&empty.report, "tag is not a publish");
-    not_has(&empty.script, "cargo update -p rfc9162");
+    not_has(&empty.script, "cargo update -p 'rfc9162'");
 
     let recorded = plan(
         &root,
@@ -977,7 +977,7 @@ branch = "bump"
         &[],
     );
     assert_eq!(recorded.code, 0, "{}", recorded.report);
-    has(&recorded.script, "cargo update -p rfc9162");
+    has(&recorded.script, "cargo update -p 'rfc9162'");
 
     let root = tmp();
     let core = init(&root, "readcon-core");
@@ -1068,7 +1068,7 @@ branch = "bump"
         &[],
     );
     assert_eq!(pass.code, 0, "{}", pass.report);
-    has(&pass.script, "cargo update -p rgmin");
+    has(&pass.script, "cargo update -p 'rgmin'");
 
     git(&rgmin, &["tag", "v0.8.0"]);
     let fail = plan(
@@ -1078,7 +1078,7 @@ branch = "bump"
     );
     assert_eq!(fail.code, 0, "{}", fail.report);
     has(&fail.report, "tag is not a publish");
-    not_has(&fail.script, "cargo update -p rgmin");
+    not_has(&fail.script, "cargo update -p 'rgmin'");
 
     let root = tmp();
     let saddle = init(&root, "rgsaddle");
@@ -1387,8 +1387,8 @@ paths = ["src/api.rs"]
         &[],
     );
     assert_eq!(quiet.code, 0, "{}", quiet.report);
-    has(&quiet.script, "HEAD:core-ls1");
-    not_has(&quiet.script, "HEAD:desktop-wait");
+    has(&quiet.script, "HEAD:'core-ls1'");
+    not_has(&quiet.script, "HEAD:'desktop-wait'");
 
     branch_new(&desk, "desktop-touch");
     checkout(&desk, "desktop-touch");
@@ -1421,7 +1421,7 @@ paths = ["src/api.rs"]
         &[],
     );
     assert_eq!(waiting.code, 0, "{}", waiting.report);
-    not_has(&waiting.script, "HEAD:desktop-touch");
+    not_has(&waiting.script, "HEAD:'desktop-touch'");
     fs::write(
         root.join("run.toml"),
         "[[done]]\nid = \"core\"\nlanded = true\n",
@@ -1454,7 +1454,7 @@ paths = ["src/api.rs"]
         &["--run", root.join("run.toml").to_str().unwrap()],
     );
     assert_eq!(go.code, 0, "{}", go.report);
-    has(&go.script, "HEAD:desktop-touch");
+    has(&go.script, "HEAD:'desktop-touch'");
 
     let root = tmp();
     let readcon = init(&root, "readcon");
@@ -1578,10 +1578,10 @@ needs = ["eon"]
     );
     assert_eq!(out.code, 0, "{}", out.report);
     not_has(&out.script, "vendor/metatensor-sys");
-    not_has(&out.script, "HEAD:fix/amsel-gate-single-lid");
+    not_has(&out.script, "HEAD:'fix/amsel-gate-single-lid'");
     has(&out.report, "unmarked patch: linkcell");
     has(&out.report, "edge: eon -> amsel-akmc needs");
-    not_has(&out.script, "HEAD:keep");
+    not_has(&out.script, "HEAD:'keep'");
 
     let root = tmp();
     let rgmin = init(&root, "rgmin");
@@ -1629,7 +1629,7 @@ branch = "bump"
     let held = plan(&root, nodes, &[]);
     assert_eq!(held.code, 0, "{}", held.report);
     has(&held.report, "patch: rgmin");
-    not_has(&held.script, "cargo update -p rgmin");
+    not_has(&held.script, "cargo update -p 'rgmin'");
     not_has(&held.script, &old);
 
     let refused = plan(
@@ -1739,7 +1739,7 @@ fn step_08_order_cycles_rerun() {
     let keep = second.script.find("eb-keep-logs").unwrap();
     let staged = second.script.find("eb-staged-rebuild").unwrap();
     assert!(keep < staged, "{}", second.script);
-    has(&second.script, "zig fetch --save=zig_common");
+    has(&second.script, "zig fetch --save='zig_common'");
     has(&second.report, "unordered");
     not_has(&second.report, "edge: eb-keep-logs -> eb-staged-rebuild");
     not_has(&second.report, "edge: eb-staged-rebuild -> eb-keep-logs");
@@ -1880,7 +1880,7 @@ branch = "bump"
     );
     assert_eq!(rerun.code, 0, "{}", rerun.report);
     not_has(&rerun.script, "git merge");
-    not_has(&rerun.script, "HEAD:up");
+    not_has(&rerun.script, "HEAD:'up'");
     let bump = rerun.script.find("cargo update").unwrap();
     if let Some(push) = rerun.script.find("git push") {
         assert!(bump < push, "{}", rerun.script);
@@ -1972,10 +1972,1611 @@ branch = "land"
     );
     assert_eq!(pushed.code, 0, "{}", pushed.report);
     assert!(pushed.script_path.exists());
-    has(&pushed.script, "git push origin HEAD:land");
+    has(&pushed.script, "git push origin HEAD:'land'");
     let ran = Command::new("sh")
         .arg(&pushed.script_path)
         .status()
         .unwrap();
     assert!(!ran.success());
+}
+
+fn mode_exec(path: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    let mut p = fs::metadata(path).unwrap().permissions();
+    p.set_mode(0o755);
+    fs::set_permissions(path, p).unwrap();
+}
+
+fn bare_at(dir: &Path, bare: &Path) {
+    git(dir, &["init", "--bare", "-q", &bare.to_string_lossy()]);
+    git(dir, &["remote", "add", "origin", &bare.to_string_lossy()]);
+}
+
+#[test]
+fn quoted_workspace_value_does_not_run() {
+    let root = tmp();
+    let repo = init(&root, "box");
+    branch_new(&repo, "land");
+    git(&repo, &["commit", "--allow-empty", "-qm", "land"]);
+    let mark = root.join("pwned");
+    let mark2 = root.join("pwned2");
+    let nasty = format!(
+        "pre $(touch {}) `touch {}` it's",
+        mark.display(),
+        mark2.display()
+    );
+    let ws = format!(
+        r#"
+[[node]]
+id = "box"
+repo = "box"
+path = "box"
+base = "{nasty}"
+branch = "land"
+sync = "no-ff"
+"#
+    );
+    let out = plan(&root, &ws, &[]);
+    assert_eq!(out.code, 0, "{}", out.report);
+    let syntax = Command::new("sh")
+        .arg("-n")
+        .arg(&out.script_path)
+        .status()
+        .unwrap();
+    assert!(syntax.success(), "{}", out.script);
+    assert!(
+        !out.script.contains("git merge --no-ff pre "),
+        "{}",
+        out.script
+    );
+    let ran = Command::new("sh").arg(&out.script_path).status().unwrap();
+    assert!(!ran.success());
+    assert!(!mark.exists(), "payload ran\n{}", out.script);
+    assert!(!mark2.exists(), "payload ran\n{}", out.script);
+}
+
+#[test]
+fn pushed_branch_contains_the_edit() {
+    let root = tmp();
+    let link = init(&root, "linkcell");
+    write_file(&link, "src/lib.rs", "pub fn x() {}\n");
+    commit_all(&link, "lib");
+    let (old, new) = same_tree(&link);
+    branch_new(&link, "main");
+    let seams = init(&root, "seams");
+    write_file(
+        &seams,
+        "subprojects/linkcell.wrap",
+        &format!(
+            "[wrap-git]\nurl = https://github.com/lode-org/linkcell.git\nrevision = {old}\ndepth = 1\n"
+        ),
+    );
+    commit_all(&seams, "wrap");
+    branch_new(&seams, "bump");
+    ahead(&seams);
+    let bare = root.join("seams.git");
+    bare_at(&seams, &bare);
+    let out = plan(
+        &root,
+        r#"
+[[node]]
+id = "linkcell"
+repo = "linkcell"
+path = "linkcell"
+base = "develop"
+branch = "main"
+
+[[node]]
+id = "seams"
+repo = "seams"
+path = "seams"
+base = "develop"
+branch = "bump"
+"#,
+        &[],
+    );
+    assert_eq!(out.code, 0, "{}", out.report);
+    has(&out.script, "git commit -m");
+    let ran = Command::new("sh").arg(&out.script_path).status().unwrap();
+    assert!(ran.success(), "{}", out.script);
+    let shown = git(&bare, &["show", "bump:subprojects/linkcell.wrap"]);
+    has(&shown, &format!("revision = {new}"));
+    has(&shown, "depth = 1");
+    let msg = git(&bare, &["log", "-1", "--format=%B", "bump"]);
+    has(&msg, "bump linkcell");
+    not_has(&msg, "Depends-on");
+    not_has(&msg, "Co-authored-by");
+    let raw = git(&bare, &["cat-file", "commit", "bump"]);
+    not_has(&raw, "gpgsig");
+
+    let root = tmp();
+    let up = init(&root, "potentials-schema");
+    write_file(&up, "README", "schema\n");
+    commit_all(&up, "schema");
+    let cons = init(&root, "cpmdc");
+    write_file(
+        &cons,
+        "subprojects/potentials.wrap",
+        "[wrap-file]\nsource_url = https://github.com/lode-org/potentials-schema\nsource_hash = abcdef\n",
+    );
+    commit_all(&cons, "wrap");
+    branch_new(&cons, "bump");
+    ahead(&cons);
+    let stub = root.join("hash-stub");
+    fs::write(
+        &stub,
+        "#!/bin/sh\nprintf '%s\\n' 'source_hash = fedcba9876' > \"$1\"\n",
+    )
+    .unwrap();
+    mode_exec(&stub);
+    let bare = root.join("cpmdc.git");
+    bare_at(&cons, &bare);
+    let out = plan(
+        &root,
+        &format!(
+            "hash_command = \"{}\"\n\n[[node]]\nid = \"potentials-schema\"\nrepo = \"potentials-schema\"\npath = \"potentials-schema\"\nbase = \"develop\"\nbranch = \"develop\"\n\n[[node]]\nid = \"cpmdc\"\nrepo = \"cpmdc\"\npath = \"cpmdc\"\nbase = \"develop\"\nbranch = \"bump\"\n",
+            stub.display()
+        ),
+        &[],
+    );
+    assert_eq!(out.code, 0, "{}", out.report);
+    let ran = Command::new("sh").arg(&out.script_path).status().unwrap();
+    assert!(ran.success(), "{}", out.script);
+    let shown = git(&bare, &["show", "bump:subprojects/potentials.wrap"]);
+    has(&shown, "source_hash = fedcba9876");
+
+    let root = tmp();
+    let link = init(&root, "linkcell");
+    branch_new(&link, "fix/exception-typeinfo-r3");
+    write_file(&link, "src/lib.rs", "pub fn a() {}\n");
+    commit_all(&link, "a");
+    let old = rev(&link, "HEAD");
+    write_file(&link, "src/lib.rs", "pub fn b() {}\n");
+    commit_all(&link, "b");
+    let landed = rev(&link, "HEAD");
+    let seams = init(&root, "seams");
+    write_file(
+        &seams,
+        "subprojects/linkcell.wrap",
+        &format!(
+            "[wrap-git]\nurl = https://github.com/lode-org/linkcell.git\nrevision = {old}\ndepth = 1\ndiff_files = linkcell-exception-typeinfo.patch\n"
+        ),
+    );
+    write_file(
+        &seams,
+        "conda/recipe.sh",
+        "patch -p1 < linkcell-exception-typeinfo.patch\n",
+    );
+    commit_all(&seams, "wrap");
+    branch_new(&seams, "bump");
+    ahead(&seams);
+    let bare = root.join("seams.git");
+    bare_at(&seams, &bare);
+    fs::write(
+        root.join("run.toml"),
+        "[[done]]\nid = \"linkcell\"\nlanded = true\n",
+    )
+    .unwrap();
+    let out = plan(
+        &root,
+        r#"
+[[node]]
+id = "linkcell"
+repo = "linkcell"
+path = "linkcell"
+base = "develop"
+branch = "fix/exception-typeinfo-r3"
+
+[[node]]
+id = "seams"
+repo = "seams"
+path = "seams"
+base = "develop"
+branch = "bump"
+drop = true
+"#,
+        &["--run", root.join("run.toml").to_str().unwrap()],
+    );
+    assert_eq!(out.code, 0, "{}", out.report);
+    let ran = Command::new("sh").arg(&out.script_path).status().unwrap();
+    assert!(ran.success(), "{}", out.script);
+    let wrap = git(&bare, &["show", "bump:subprojects/linkcell.wrap"]);
+    has(&wrap, &format!("revision = {landed}"));
+    not_has(&wrap, "diff_files");
+    let recipe = git(&bare, &["show", "bump:conda/recipe.sh"]);
+    not_has(&recipe, "linkcell-exception-typeinfo.patch");
+}
+
+#[test]
+fn branch_pins_order_and_rewrite() {
+    let root = tmp();
+    let zig = init(&root, "zig-common");
+    write_file(&zig, "src/root.zig", "pub const x = 1;\n");
+    commit_all(&zig, "base");
+    git(&zig, &["branch", "main"]);
+    branch_new(&zig, "feat-dev");
+    git(&zig, &["commit", "--allow-empty", "-qm", "feat-dev"]);
+    let dev_tip = rev(&zig, "HEAD");
+    checkout(&zig, "main");
+    branch_new(&zig, "feat-main");
+    git(&zig, &["commit", "--allow-empty", "-qm", "feat-main"]);
+    let main_tip = rev(&zig, "HEAD");
+    checkout(&zig, "develop");
+    let cons = init(&root, "eb");
+    write_file(
+        &cons,
+        "build.zig.zon",
+        ".{\n.dependencies = .{\n.on_main = .{ .url = \"git+https://github.com/eessi/zig-common?ref=main\", .hash = \"1220abcd\", },\n.on_develop = .{ .url = \"git+https://github.com/eessi/zig-common?ref=develop\", .hash = \"1220abcd\", },\n},\n}\n",
+    );
+    commit_all(&cons, "pin");
+    branch_new(&cons, "bump");
+    ahead(&cons);
+    let ws = r#"
+[[node]]
+id = "feat-dev"
+repo = "zig-common"
+path = "zig-common"
+base = "develop"
+branch = "feat-dev"
+
+[[node]]
+id = "feat-main"
+repo = "zig-common"
+path = "zig-common"
+base = "main"
+branch = "feat-main"
+
+[[node]]
+id = "eb"
+repo = "eb"
+path = "eb"
+base = "develop"
+branch = "bump"
+"#;
+    let open = plan(&root, ws, &[]);
+    assert_eq!(open.code, 0, "{}", open.report);
+    has(&open.report, "edge: feat-dev -> eb branch");
+    has(&open.report, "edge: feat-main -> eb branch");
+    not_has(&open.script, "zig fetch");
+    fs::write(
+        root.join("run.toml"),
+        "[[done]]\nid = \"feat-dev\"\nlanded = true\n[[done]]\nid = \"feat-main\"\nlanded = true\n",
+    )
+    .unwrap();
+    let ready = plan(
+        &root,
+        ws,
+        &["--run", root.join("run.toml").to_str().unwrap()],
+    );
+    assert_eq!(ready.code, 0, "{}", ready.report);
+    has(&ready.script, "ref=develop");
+    has(&ready.script, "ref=main");
+    has(&ready.script, "zig fetch --save='on_develop'");
+    has(&ready.script, "zig fetch --save='on_main'");
+    not_has(&ready.script, &dev_tip);
+    not_has(&ready.script, &main_tip);
+
+    let root = tmp();
+    let up = init(&root, "topic-repo");
+    write_file(&up, "src/lib.rs", "pub fn a() {}\n");
+    commit_all(&up, "a");
+    branch_new(&up, "topic");
+    write_file(&up, "src/lib.rs", "pub fn b() {}\n");
+    commit_all(&up, "b");
+    let sha = rev(&up, "HEAD");
+    checkout(&up, "develop");
+    git(&up, &["merge", "--ff-only", "topic"]);
+    let cons = init(&root, "anneal");
+    write_file(
+        &cons,
+        "Cargo.toml",
+        &cargo_pkg(
+            "anneal",
+            "[dependencies]\ntopic = { git = \"https://github.com/example/topic-repo\", branch = \"topic\" }\n",
+        ),
+    );
+    commit_all(&cons, "pin");
+    branch_new(&cons, "bump");
+    ahead(&cons);
+    let out = plan(
+        &root,
+        r#"
+[[node]]
+id = "topic-node"
+repo = "topic-repo"
+path = "topic-repo"
+base = "develop"
+branch = "topic"
+
+[[node]]
+id = "anneal"
+repo = "anneal"
+path = "anneal"
+base = "develop"
+branch = "bump"
+"#,
+        &[],
+    );
+    assert_eq!(out.code, 0, "{}", out.report);
+    has(&out.report, "edge: topic-node -> anneal cargo");
+    has(&out.script, &sha);
+    has(&out.script, &format!("rev = \"{sha}\""));
+}
+
+#[test]
+fn metadata_rev_resolves_unique_short_sha() {
+    let root = tmp();
+    let up = init(&root, "lammpc");
+    write_file(&up, "src/lib.rs", "pub fn a() {}\n");
+    commit_all(&up, "a");
+    let (old, new) = same_tree(&up);
+    let short = &old[..8];
+    branch_new(&up, "main");
+    let cons = init(&root, "desk");
+    write_file(
+        &cons,
+        "Cargo.toml",
+        &format!(
+            "[package]\nname = \"desk\"\nversion = \"0.1.0\"\n\n[package.metadata]\nlammpc-rev = \"{short}\"\nlammpc-git = \"https://github.com/example/lammpc\"\n"
+        ),
+    );
+    commit_all(&cons, "pin");
+    branch_new(&cons, "bump");
+    ahead(&cons);
+    let ws = r#"
+metadata_rev = ["lammpc-rev"]
+
+[[node]]
+id = "lammpc"
+repo = "lammpc"
+path = "lammpc"
+base = "develop"
+branch = "main"
+
+[[node]]
+id = "desk"
+repo = "desk"
+path = "desk"
+base = "develop"
+branch = "bump"
+"#;
+    let out = plan(&root, ws, &[]);
+    assert_eq!(out.code, 0, "{}", out.report);
+    has(&out.report, &format!("spec: commit {short}"));
+    has(&out.report, "edge: lammpc -> desk cargo");
+    has(&out.script, short);
+    has(&out.script, &new);
+
+    let missing = "0000aaaa";
+    write_file(
+        &cons,
+        "Cargo.toml",
+        &format!(
+            "[package]\nname = \"desk\"\nversion = \"0.1.0\"\n\n[package.metadata]\nlammpc-rev = \"{missing}\"\nlammpc-git = \"https://github.com/example/lammpc\"\n"
+        ),
+    );
+    commit_all(&cons, "missing pin");
+    let absent = plan(&root, ws, &[]);
+    assert_eq!(absent.code, 0, "{}", absent.report);
+    has(&absent.report, &format!("pin sha absent {missing}"));
+    assert!(
+        !absent
+            .report
+            .split_whitespace()
+            .any(|w| w.len() == 40 && w.starts_with(missing)),
+        "{}",
+        absent.report
+    );
+}
+
+#[test]
+fn script_omits_forbidden_commands() {
+    let root = tmp();
+    let repo = init(&root, "ttech");
+    branch_new(&repo, "land");
+    git(&repo, &["commit", "--allow-empty", "-qm", "land"]);
+    let open = plan(
+        &root,
+        r#"
+[[node]]
+id = "ttech"
+repo = "ttech"
+path = "ttech"
+base = "develop"
+branch = "land"
+open_pr = true
+sync = "no-ff"
+"#,
+        &[],
+    );
+    assert_eq!(open.code, 0, "{}", open.report);
+    for bad in [
+        "--force-with-lease",
+        "--force",
+        "gh pr merge",
+        "gh pr edit --base",
+        "gh pr close",
+        "git tag",
+        "cargo publish",
+        "Depends-on",
+        "Co-authored-by",
+    ] {
+        not_has(&open.script, bad);
+    }
+    has(&open.script, "git push origin HEAD:'land'");
+    has(&open.script, "git merge --no-ff 'develop'");
+    let list = open.script.find("gh pr list").unwrap();
+    let create = open.script.find("gh pr create").unwrap();
+    assert!(list < create, "{}", open.script);
+    let saved = root.join("open.sh");
+    fs::write(&saved, &open.script).unwrap();
+
+    let closed = plan(
+        &root,
+        r#"
+[[node]]
+id = "ttech"
+repo = "ttech"
+path = "ttech"
+base = "develop"
+branch = "land"
+open_pr = false
+"#,
+        &[],
+    );
+    not_has(&closed.script, "gh pr create");
+
+    let stub_dir = root.join("bin");
+    fs::create_dir_all(&stub_dir).unwrap();
+    let gh = stub_dir.join("gh");
+    fs::write(
+        &gh,
+        "#!/bin/sh\nif [ \"$1\" = pr ] && [ \"$2\" = list ]; then printf '%s\\n' \"$LIST\"; exit 0; fi\nif [ \"$1\" = pr ] && [ \"$2\" = create ]; then touch \"$MARK\"; exit 0; fi\nexit 0\n",
+    )
+    .unwrap();
+    mode_exec(&gh);
+    let path = format!("{}:{}", stub_dir.display(), std::env::var("PATH").unwrap());
+    let found = root.join("created");
+    let _ = fs::remove_file(&found);
+    let listed = Command::new("sh")
+        .arg(&saved)
+        .env("PATH", &path)
+        .env("LIST", "[{\"number\":7}]")
+        .env("MARK", &found)
+        .status()
+        .unwrap();
+    assert!(!listed.success());
+    assert!(!found.exists(), "create ran after a listed pull request");
+    let empty = Command::new("sh")
+        .arg(&saved)
+        .env("PATH", &path)
+        .env("LIST", "[]")
+        .env("MARK", &found)
+        .status()
+        .unwrap();
+    assert!(!empty.success());
+    assert!(
+        found.exists(),
+        "create did not run when the list was empty\n{}",
+        open.script
+    );
+}
+
+struct MatrixRow {
+    step: u8,
+    name: &'static str,
+    case: fn(),
+}
+
+fn matrix_table() -> Vec<MatrixRow> {
+    vec![
+        MatrixRow {
+            step: 1,
+            name: "ttech open_pr false",
+            case: m_open_pr,
+        },
+        MatrixRow {
+            step: 1,
+            name: "zig-common tree mismatch",
+            case: m_tree,
+        },
+        MatrixRow {
+            step: 1,
+            name: "anneal missing bundle",
+            case: m_bundle,
+        },
+        MatrixRow {
+            step: 2,
+            name: "eb-local closed base",
+            case: m_closed,
+        },
+        MatrixRow {
+            step: 2,
+            name: "anneal supersede",
+            case: m_super,
+        },
+        MatrixRow {
+            step: 2,
+            name: "amsel sibling file",
+            case: m_sibling,
+        },
+        MatrixRow {
+            step: 3,
+            name: "zig zon refs",
+            case: m_zon,
+        },
+        MatrixRow {
+            step: 3,
+            name: "anneal cargo rev",
+            case: m_cargo,
+        },
+        MatrixRow {
+            step: 3,
+            name: "fix sha",
+            case: m_fix,
+        },
+        MatrixRow {
+            step: 4,
+            name: "linkcell wrap depth",
+            case: m_wrap,
+        },
+        MatrixRow {
+            step: 4,
+            name: "hash command absent",
+            case: m_hash_absent,
+        },
+        MatrixRow {
+            step: 4,
+            name: "eigen wrap unmatched",
+            case: m_eigen,
+        },
+        MatrixRow {
+            step: 5,
+            name: "rfc9162 tag is not a publish",
+            case: m_pub_empty,
+        },
+        MatrixRow {
+            step: 5,
+            name: "rfc9162 publish record",
+            case: m_pub_record,
+        },
+        MatrixRow {
+            step: 5,
+            name: "cargo rev is not a publish",
+            case: m_git_not_pub,
+        },
+        MatrixRow {
+            step: 6,
+            name: "integer consumer ungated",
+            case: m_ungated,
+        },
+        MatrixRow {
+            step: 6,
+            name: "synthetic exact mismatch",
+            case: m_synthetic,
+        },
+        MatrixRow {
+            step: 6,
+            name: "two claims",
+            case: m_claims,
+        },
+        MatrixRow {
+            step: 7,
+            name: "path patch kept",
+            case: m_path,
+        },
+        MatrixRow {
+            step: 7,
+            name: "land false",
+            case: m_land,
+        },
+        MatrixRow {
+            step: 7,
+            name: "no trailers",
+            case: m_trailers,
+        },
+        MatrixRow {
+            step: 8,
+            name: "cycle",
+            case: m_cycle,
+        },
+        MatrixRow {
+            step: 8,
+            name: "rerun after landing",
+            case: m_rerun,
+        },
+        MatrixRow {
+            step: 8,
+            name: "ambiguous pin",
+            case: m_ambig,
+        },
+    ]
+}
+
+#[test]
+fn matrix_each_step_has_three_cases() {
+    let rows = matrix_table();
+    for step in 1..=8 {
+        let n = rows.iter().filter(|r| r.step == step).count();
+        assert!(n >= 3, "step {step} has {n}");
+    }
+    for row in rows {
+        let name = row.name;
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| (row.case)())).unwrap_or_else(
+            |err| {
+                let msg = err
+                    .downcast_ref::<String>()
+                    .cloned()
+                    .or_else(|| err.downcast_ref::<&str>().map(|m| (*m).to_string()))
+                    .unwrap_or_else(|| "panic".into());
+                panic!("matrix case failed: {name}: {msg}");
+            },
+        );
+    }
+}
+
+fn m_open_pr() {
+    let root = tmp();
+    let repo = init(&root, "ttech");
+    branch_new(&repo, "land");
+    git(&repo, &["commit", "--allow-empty", "-qm", "land"]);
+    let out = plan(
+        &root,
+        r#"
+[[node]]
+id = "ttech"
+repo = "ttech"
+path = "ttech"
+base = "develop"
+branch = "land"
+open_pr = false
+"#,
+        &[],
+    );
+    assert_eq!(out.code, 0, "{}", out.report);
+    has(&out.script, "git push origin HEAD:'land'");
+    not_has(&out.script, "gh pr create");
+    not_has(&out.script, "--force");
+}
+
+fn m_tree() {
+    let root = tmp();
+    let repo = init(&root, "zig-common");
+    write_file(&repo, "f.txt", "a\n");
+    commit_all(&repo, "a");
+    branch_new(&repo, "land");
+    let actual = rev(&repo, "HEAD^{tree}");
+    let bundle = root.join("b.bundle");
+    bundle_on_tip(&repo, &bundle);
+    let empty = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
+    let out = plan(
+        &root,
+        &format!(
+            r#"
+[[node]]
+id = "logs"
+repo = "zig-common"
+path = "zig-common"
+base = "develop"
+branch = "land"
+source = "bundle"
+bundle = "b.bundle"
+lease_matches = "head"
+tree = "{empty}"
+"#
+        ),
+        &[],
+    );
+    assert_eq!(out.code, 0, "{}", out.report);
+    has(&out.report, "tree mismatch");
+    has(&out.report, &actual);
+    has(&out.report, empty);
+    not_has(&out.script, "HEAD:'land'");
+}
+
+fn m_bundle() {
+    let root = tmp();
+    let holder = init(&root, "holder");
+    git(&holder, &["commit", "--allow-empty", "-qm", "a"]);
+    let missing = rev(&holder, "HEAD");
+    git(&holder, &["commit", "--allow-empty", "-qm", "b"]);
+    let bundle = root.join("a.bundle");
+    git(
+        &holder,
+        &[
+            "bundle",
+            "create",
+            &bundle.to_string_lossy(),
+            "HEAD",
+            &format!("^{missing}"),
+        ],
+    );
+    let repo = init(&root, "anneal");
+    branch_new(&repo, "land");
+    git(&repo, &["commit", "--allow-empty", "-qm", "land"]);
+    let out = plan(
+        &root,
+        r#"
+[[node]]
+id = "anneal-179"
+repo = "anneal"
+path = "anneal"
+base = "develop"
+branch = "land"
+source = "bundle"
+bundle = "a.bundle"
+lease_matches = "head"
+"#,
+        &[],
+    );
+    assert_eq!(out.code, 1, "{}", out.report);
+    has(&out.report, &missing);
+    assert!(!out.script_path.exists());
+}
+
+fn m_closed() {
+    let root = tmp();
+    let eb = init(&root, "eb-local");
+    branch_new(&eb, "fix/wrappers");
+    grow(&eb, 3, "ahead");
+    checkout(&eb, "develop");
+    grow(&eb, 4, "behind");
+    let other = init(&root, "other");
+    branch_new(&other, "land");
+    git(&other, &["commit", "--allow-empty", "-qm", "land"]);
+    let out = plan(
+        &root,
+        r#"
+[[node]]
+id = "eb-346"
+repo = "eb-local"
+path = "eb-local"
+base = "develop"
+branch = "fix/wrappers"
+base_pr = 345
+base_pr_state = "closed"
+
+[[node]]
+id = "other"
+repo = "other"
+path = "other"
+base = "develop"
+branch = "land"
+"#,
+        &[],
+    );
+    assert_eq!(out.code, 0, "{}", out.report);
+    has(&out.report, "ahead: 3");
+    has(&out.report, "behind: 4");
+    has(&out.report, "base pull request 345 is closed");
+    not_has(&out.script, "HEAD:'fix/wrappers'");
+    not_has(&out.script, "gh pr close");
+    has(&out.script, "HEAD:'land'");
+}
+
+fn m_super() {
+    let root = tmp();
+    let repo = init(&root, "anneal");
+    branch_new(&repo, "old");
+    git(&repo, &["commit", "--allow-empty", "-qm", "old"]);
+    checkout(&repo, "develop");
+    branch_new(&repo, "new");
+    git(&repo, &["commit", "--allow-empty", "-qm", "new"]);
+    let out = plan(
+        &root,
+        r#"
+[[node]]
+id = "anneal-251"
+repo = "anneal"
+path = "anneal"
+base = "develop"
+branch = "new"
+supersedes = "anneal-248"
+
+[[node]]
+id = "anneal-248"
+repo = "anneal"
+path = "anneal"
+base = "develop"
+branch = "old"
+"#,
+        &[],
+    );
+    assert_eq!(out.code, 0, "{}", out.report);
+    has(&out.report, "superseded-by: anneal-251");
+    has(&out.report, "supersedes: anneal-248");
+    not_has(&out.script, "HEAD:'old'");
+    has(&out.script, "HEAD:'new'");
+}
+
+fn m_sibling() {
+    let root = tmp();
+    let repo = init(&root, "amsel");
+    write_file(&repo, "amsel-core/Cargo.toml", "token = \"base\"\n");
+    commit_all(&repo, "base");
+    branch_new(&repo, "tica");
+    write_file(&repo, "amsel-core/Cargo.toml", "token = \"tica\"\n");
+    commit_all(&repo, "tica");
+    checkout(&repo, "develop");
+    branch_new(&repo, "feat-70");
+    write_file(&repo, "amsel-core/Cargo.toml", "token = \"pr70\"\n");
+    commit_all(&repo, "pr70");
+    let out = plan(
+        &root,
+        r#"
+[[node]]
+id = "tica"
+repo = "amsel"
+path = "amsel"
+base = "develop"
+branch = "tica"
+
+[[node]]
+id = "feat-70"
+repo = "amsel"
+path = "amsel"
+base = "develop"
+branch = "feat-70"
+"#,
+        &[],
+    );
+    assert_eq!(out.code, 0, "{}", out.report);
+    has(&out.report, "sibling:");
+    has(&out.report, "amsel-core/Cargo.toml");
+}
+
+fn m_zon() {
+    let root = tmp();
+    let zig = init(&root, "zig-common");
+    write_file(&zig, "src/root.zig", "pub const x = 1;\n");
+    commit_all(&zig, "lib");
+    let bare = rev(&zig, "HEAD");
+    git(&zig, &["tag", "v0.9.0"]);
+    git(&zig, &["branch", "main"]);
+    let cons = init(&root, "eb");
+    let hash = "1220deadbeefdeadbeefdeadbeefdeadbeefdeadbeef";
+    write_file(
+        &cons,
+        "build.zig.zon",
+        &format!(
+            ".{{\n.dependencies = .{{\n.tagged = .{{ .url = \"git+https://github.com/eessi/zig-common?ref=v0.9.0\", .hash = \"{hash}\", }},\n.on_main = .{{ .url = \"git+https://github.com/eessi/zig-common?ref=main#{bare}\", .hash = \"{hash}\", }},\n.on_develop = .{{ .url = \"git+https://github.com/eessi/zig-common?ref=develop#{bare}\", .hash = \"{hash}\", }},\n.bare = .{{ .url = \"git+https://github.com/eessi/zig-common#{bare}\", .hash = \"{hash}\", }},\n}},\n}}\n"
+        ),
+    );
+    commit_all(&cons, "pin");
+    branch_new(&cons, "bump");
+    ahead(&cons);
+    let out = plan(
+        &root,
+        r#"
+[[node]]
+id = "eb"
+repo = "eb"
+path = "eb"
+base = "develop"
+branch = "bump"
+"#,
+        &[],
+    );
+    assert_eq!(out.code, 0, "{}", out.report);
+    has(&out.report, "spec: tag v0.9.0");
+    has(&out.report, "spec: branch main");
+    has(&out.report, "spec: branch develop");
+    has(&out.report, &format!("spec: commit {bare}"));
+}
+
+fn m_cargo() {
+    let root = tmp();
+    let up = init(&root, "rgpot");
+    write_file(&up, "src/lib.rs", "pub fn a() {}\n");
+    commit_all(&up, "a");
+    let (old, new) = same_tree(&up);
+    branch_new(&up, "main");
+    let cons = init(&root, "anneal");
+    write_file(
+        &cons,
+        "Cargo.toml",
+        &cargo_pkg(
+            "anneal",
+            &format!("[dependencies]\nrgpot-pair = {{ git = \"https://github.com/example/rgpot\", rev = \"{old}\" }}\n"),
+        ),
+    );
+    commit_all(&cons, "pin");
+    branch_new(&cons, "bump");
+    ahead(&cons);
+    let out = plan(
+        &root,
+        r#"
+[[node]]
+id = "rgpot"
+repo = "rgpot"
+path = "rgpot"
+base = "develop"
+branch = "main"
+
+[[node]]
+id = "anneal"
+repo = "anneal"
+path = "anneal"
+base = "develop"
+branch = "bump"
+"#,
+        &[],
+    );
+    assert_eq!(out.code, 0, "{}", out.report);
+    has(&out.report, "edge: rgpot -> anneal cargo");
+    has(&out.script, "cargo update -p 'rgpot-pair'");
+    has(&out.script, &new);
+}
+
+fn m_fix() {
+    let root = tmp();
+    let up = init(&root, "rgsaddle");
+    write_file(&up, "src/lib.rs", "pub fn a() {}\n");
+    commit_all(&up, "a");
+    branch_new(&up, "bad");
+    git(&up, &["commit", "--allow-empty", "-qm", "bad"]);
+    let fix = rev(&up, "HEAD");
+    let cons = init(&root, "si");
+    write_file(
+        &cons,
+        "Cargo.toml",
+        &cargo_pkg(
+            "si",
+            &format!("[dependencies]\nrgsaddle = {{ git = \"https://github.com/example/rgsaddle\", rev = \"{fix}\" }}\n"),
+        ),
+    );
+    commit_all(&cons, "pin");
+    branch_new(&cons, "bump");
+    ahead(&cons);
+    let out = plan(
+        &root,
+        &format!(
+            r#"
+fix_sha = ["{fix}"]
+
+[[node]]
+id = "rgsaddle"
+repo = "rgsaddle"
+path = "rgsaddle"
+base = "develop"
+branch = "bad"
+
+[[node]]
+id = "si"
+repo = "si"
+path = "si"
+base = "develop"
+branch = "bump"
+"#
+        ),
+        &[],
+    );
+    assert_eq!(out.code, 0, "{}", out.report);
+    has(&out.report, &format!("fix sha {fix}"));
+    not_has(&out.script, "HEAD:'bump'");
+}
+
+fn m_wrap() {
+    let root = tmp();
+    let link = init(&root, "linkcell");
+    write_file(&link, "src/lib.rs", "pub fn x() {}\n");
+    commit_all(&link, "lib");
+    let (old, new) = same_tree(&link);
+    branch_new(&link, "main");
+    let seams = init(&root, "seams");
+    write_file(
+        &seams,
+        "subprojects/linkcell.wrap",
+        &format!("[wrap-git]\nurl = https://github.com/lode-org/linkcell.git\nrevision = {old}\ndepth = 1\n"),
+    );
+    commit_all(&seams, "wrap");
+    branch_new(&seams, "bump");
+    ahead(&seams);
+    let out = plan(
+        &root,
+        r#"
+[[node]]
+id = "linkcell"
+repo = "linkcell"
+path = "linkcell"
+base = "develop"
+branch = "main"
+
+[[node]]
+id = "seams"
+repo = "seams"
+path = "seams"
+base = "develop"
+branch = "bump"
+"#,
+        &[],
+    );
+    assert_eq!(out.code, 0, "{}", out.report);
+    has(&out.report, "depth = 1");
+    has(&out.script, &format!("revision = {new}"));
+    has(&out.script, "# depth = '1'");
+    let on_disk = fs::read_to_string(seams.join("subprojects/linkcell.wrap")).unwrap();
+    has(&on_disk, "depth = 1");
+}
+
+fn m_hash_absent() {
+    let root = tmp();
+    let up = init(&root, "potentials-schema");
+    write_file(&up, "README", "schema\n");
+    commit_all(&up, "schema");
+    let cons = init(&root, "cpmdc");
+    let body = "[wrap-file]\nsource_url = https://github.com/lode-org/potentials-schema\nsource_hash = abcdef\n";
+    write_file(&cons, "subprojects/potentials.wrap", body);
+    commit_all(&cons, "wrap");
+    branch_new(&cons, "bump");
+    ahead(&cons);
+    let out = plan(
+        &root,
+        r#"
+[[node]]
+id = "potentials-schema"
+repo = "potentials-schema"
+path = "potentials-schema"
+base = "develop"
+branch = "develop"
+
+[[node]]
+id = "cpmdc"
+repo = "cpmdc"
+path = "cpmdc"
+base = "develop"
+branch = "bump"
+"#,
+        &[],
+    );
+    assert_eq!(out.code, 0, "{}", out.report);
+    has(&out.report, "hash command is absent");
+    assert_eq!(
+        fs::read_to_string(cons.join("subprojects/potentials.wrap")).unwrap(),
+        body
+    );
+}
+
+fn m_eigen() {
+    let root = tmp();
+    let seams = init(&root, "seams");
+    write_file(
+        &seams,
+        "subprojects/eigen.wrap",
+        "[wrap-git]\nurl = https://github.com/eigen/eigen.git\nrevision = v3.4.0\n",
+    );
+    commit_all(&seams, "wrap");
+    branch_new(&seams, "bump");
+    ahead(&seams);
+    let out = plan(
+        &root,
+        r#"
+[[node]]
+id = "seams"
+repo = "seams"
+path = "seams"
+base = "develop"
+branch = "bump"
+"#,
+        &[],
+    );
+    assert_eq!(out.code, 0, "{}", out.report);
+    assert!(!out
+        .report
+        .lines()
+        .any(|l| l.starts_with("edge:") && l.contains("eigen")));
+}
+
+fn m_pub_empty() {
+    let root = tmp();
+    let repo = init(&root, "rfc9162");
+    write_file(&repo, "src/lib.rs", "pub fn x() {}\n");
+    commit_all(&repo, "lib");
+    git(&repo, &["tag", "v0.8.1"]);
+    let cons = init(&root, "eb-stack");
+    write_file(
+        &cons,
+        "Cargo.toml",
+        &cargo_pkg("eb-stack", "[dependencies]\nrfc9162 = \"=0.8.1\"\n"),
+    );
+    commit_all(&cons, "pin");
+    branch_new(&cons, "bump");
+    ahead(&cons);
+    let out = plan(
+        &root,
+        r#"
+[[node]]
+id = "publish-rfc9162"
+kind = "gate"
+gate = "publish"
+repo = "rfc9162"
+path = "rfc9162"
+crate = "rfc9162"
+version = "0.8.1"
+
+[[node]]
+id = "eb-stack"
+repo = "eb-stack"
+path = "eb-stack"
+base = "develop"
+branch = "bump"
+"#,
+        &[],
+    );
+    assert_eq!(out.code, 0, "{}", out.report);
+    has(&out.report, "tag is not a publish");
+    not_has(&out.script, "cargo update -p 'rfc9162'");
+}
+
+fn m_pub_record() {
+    let root = tmp();
+    let repo = init(&root, "rfc9162");
+    write_file(&repo, "src/lib.rs", "pub fn x() {}\n");
+    commit_all(&repo, "lib");
+    let cons = init(&root, "eb-stack");
+    write_file(
+        &cons,
+        "Cargo.toml",
+        &cargo_pkg("eb-stack", "[dependencies]\nrfc9162 = \"=0.8.1\"\n"),
+    );
+    commit_all(&cons, "pin");
+    branch_new(&cons, "bump");
+    ahead(&cons);
+    let out = plan(
+        &root,
+        r#"
+[[publish]]
+crate = "rfc9162"
+version = "0.8.1"
+
+[[node]]
+id = "publish-rfc9162"
+kind = "gate"
+gate = "publish"
+repo = "rfc9162"
+path = "rfc9162"
+crate = "rfc9162"
+version = "0.8.1"
+
+[[node]]
+id = "eb-stack"
+repo = "eb-stack"
+path = "eb-stack"
+base = "develop"
+branch = "bump"
+"#,
+        &[],
+    );
+    assert_eq!(out.code, 0, "{}", out.report);
+    has(&out.script, "cargo update -p 'rfc9162'");
+}
+
+fn m_git_not_pub() {
+    let root = tmp();
+    let up = init(&root, "rgpot");
+    write_file(&up, "src/lib.rs", "pub fn a() {}\n");
+    commit_all(&up, "a");
+    let (sha, _new) = same_tree(&up);
+    branch_new(&up, "topic");
+    let cons = init(&root, "anneal");
+    write_file(
+        &cons,
+        "Cargo.toml",
+        &cargo_pkg(
+            "anneal",
+            &format!("[dependencies]\nrgpot-pair = {{ git = \"https://github.com/example/rgpot\", rev = \"{sha}\" }}\n"),
+        ),
+    );
+    commit_all(&cons, "pin");
+    branch_new(&cons, "bump");
+    ahead(&cons);
+    let out = plan(
+        &root,
+        r#"
+[[node]]
+id = "rgpot"
+repo = "rgpot"
+path = "rgpot"
+base = "develop"
+branch = "topic"
+
+[[node]]
+id = "anneal"
+repo = "anneal"
+path = "anneal"
+base = "develop"
+branch = "bump"
+"#,
+        &[],
+    );
+    assert_eq!(out.code, 0, "{}", out.report);
+    has(&out.report, "edge: rgpot -> anneal cargo");
+    not_has(&out.report, "registry");
+    has(&out.script, "cargo update -p 'rgpot-pair'");
+}
+
+fn m_ungated() {
+    let root = tmp();
+    let stack = init(&root, "eb-stack");
+    write_file(
+        &stack,
+        "src/rebuild.h",
+        "#define REBUILD_SET_SCHEMA_VERSION 5\n",
+    );
+    commit_all(&stack, "schema");
+    let logs = init(&root, "eb-keep-logs");
+    write_file(&logs, "src/logs.h", "schema_version = 5\n");
+    commit_all(&logs, "logs");
+    let out = plan(
+        &root,
+        r#"
+[[node]]
+id = "eb-stack"
+repo = "eb-stack"
+path = "eb-stack"
+base = "develop"
+branch = "develop"
+
+[[node]]
+id = "eb-keep-logs"
+repo = "eb-keep-logs"
+path = "eb-keep-logs"
+base = "develop"
+branch = "develop"
+
+[[contract]]
+producer = "eb-stack"
+consumer = "eb-keep-logs"
+compare = "integer"
+"#,
+        &[],
+    );
+    assert_eq!(out.code, 0, "{}", out.report);
+    has(&out.report, "ungated: eb-keep-logs");
+}
+
+fn m_synthetic() {
+    let root = tmp();
+    let stack = init(&root, "eb-stack");
+    write_file(
+        &stack,
+        "src/rebuild.h",
+        "#define REBUILD_SET_SCHEMA_VERSION 5\n",
+    );
+    commit_all(&stack, "schema");
+    let pipe = init(&root, "eb-pipeline");
+    write_file(&pipe, "src/pipe.h", "#define REBUILD_SET_SCHEMA 4\n");
+    commit_all(&pipe, "synthetic");
+    let out = plan(
+        &root,
+        r#"
+[[node]]
+id = "eb-stack"
+repo = "eb-stack"
+path = "eb-stack"
+base = "develop"
+branch = "develop"
+
+[[node]]
+id = "eb-pipeline"
+repo = "eb-pipeline"
+path = "eb-pipeline"
+base = "develop"
+branch = "develop"
+
+[[contract]]
+producer = "eb-stack"
+consumer = "eb-pipeline"
+compare = "exact"
+producer_path = "src/rebuild.h"
+producer_symbol = "REBUILD_SET_SCHEMA_VERSION"
+consumer_path = "src/pipe.h"
+consumer_symbol = "REBUILD_SET_SCHEMA"
+label = "synthetic"
+"#,
+        &[],
+    );
+    assert_eq!(out.code, 2, "{}", out.report);
+    has(&out.report, "src/rebuild.h");
+    has(&out.report, "src/pipe.h");
+    has(&out.report, "synthetic");
+    assert!(!out.script_path.exists());
+}
+
+fn m_claims() {
+    let root = tmp();
+    let g = init(&root, "rgmin");
+    write_file(&g, "include/abi.h", "#define RGMIN_ABI_MINOR 21\n");
+    commit_all(&g, "base");
+    branch_new(&g, "one");
+    write_file(&g, "include/abi.h", "#define RGMIN_ABI_MINOR 22\n");
+    commit_all(&g, "22");
+    checkout(&g, "develop");
+    branch_new(&g, "two");
+    write_file(&g, "include/abi.h", "#define RGMIN_ABI_MINOR 22\n");
+    commit_all(&g, "22b");
+    let out = plan(
+        &root,
+        r#"
+[[node]]
+id = "one"
+repo = "rgmin"
+path = "rgmin"
+base = "develop"
+branch = "one"
+
+[[node]]
+id = "two"
+repo = "rgmin"
+path = "rgmin"
+base = "develop"
+branch = "two"
+
+[[claim]]
+node = "one"
+symbol = "RGMIN_ABI_MINOR"
+path = "include/abi.h"
+
+[[claim]]
+node = "two"
+symbol = "RGMIN_ABI_MINOR"
+path = "include/abi.h"
+"#,
+        &[],
+    );
+    assert_eq!(out.code, 2, "{}", out.report);
+    has(&out.report, "claim conflict:");
+    has(&out.report, "one");
+    has(&out.report, "two");
+    assert!(!out.script_path.exists());
+}
+
+fn m_path() {
+    let root = tmp();
+    let cons = init(&root, "anneal");
+    write_file(
+        &cons,
+        "Cargo.toml",
+        "[package]\nname = \"anneal\"\nversion = \"0.1.0\"\n\n[patch.crates-io]\nmetatensor-sys = { path = \"vendor/metatensor-sys\" }\n",
+    );
+    commit_all(&cons, "patch");
+    branch_new(&cons, "keep");
+    ahead(&cons);
+    let out = plan(
+        &root,
+        r#"
+[[crate_policy]]
+crate = "metatensor-sys"
+upstream = false
+
+[[node]]
+id = "anneal"
+repo = "anneal"
+path = "anneal"
+base = "develop"
+branch = "keep"
+"#,
+        &[],
+    );
+    assert_eq!(out.code, 0, "{}", out.report);
+    not_has(&out.script, "vendor/metatensor-sys");
+    has(&out.script, "HEAD:'keep'");
+}
+
+fn m_land() {
+    let root = tmp();
+    let eon = init(&root, "eon");
+    branch_new(&eon, "fix/amsel-gate-single-lid");
+    git(&eon, &["commit", "--allow-empty", "-qm", "hold"]);
+    let cons = init(&root, "amsel");
+    branch_new(&cons, "bump");
+    git(&cons, &["commit", "--allow-empty", "-qm", "bump"]);
+    let out = plan(
+        &root,
+        r#"
+[[node]]
+id = "eon"
+repo = "eon"
+path = "eon"
+base = "develop"
+branch = "fix/amsel-gate-single-lid"
+land = false
+
+[[node]]
+id = "amsel"
+repo = "amsel"
+path = "amsel"
+base = "develop"
+branch = "bump"
+needs = ["eon"]
+"#,
+        &[],
+    );
+    assert_eq!(out.code, 0, "{}", out.report);
+    has(&out.report, "edge: eon -> amsel needs");
+    not_has(&out.script, "fix/amsel-gate-single-lid");
+    not_has(&out.script, "HEAD:'bump'");
+}
+
+fn m_trailers() {
+    let root = tmp();
+    let up = init(&root, "ridley");
+    write_file(&up, "src/lib.rs", "pub fn a() {}\n");
+    commit_all(&up, "a");
+    let (old, _new) = same_tree(&up);
+    branch_new(&up, "main");
+    let cons = init(&root, "desktop");
+    write_file(
+        &cons,
+        "Cargo.toml",
+        &cargo_pkg(
+            "desktop",
+            &format!("[dependencies]\nridley-core = {{ git = \"https://github.com/ttech/ridley\", rev = \"{old}\" }}\n"),
+        ),
+    );
+    commit_all(&cons, "pin");
+    branch_new(&cons, "bump");
+    ahead(&cons);
+    let out = plan(
+        &root,
+        r#"
+[[node]]
+id = "ridley"
+repo = "ridley"
+path = "ridley"
+base = "develop"
+branch = "main"
+
+[[node]]
+id = "desktop"
+repo = "desktop"
+path = "desktop"
+base = "develop"
+branch = "bump"
+"#,
+        &[],
+    );
+    assert_eq!(out.code, 0, "{}", out.report);
+    has(&out.script, "git commit -m");
+    not_has(&out.script, "Depends-on");
+    not_has(&out.script, "Co-authored-by");
+    not_has(&out.script, "gpgsig");
+}
+
+fn m_cycle() {
+    let root = tmp();
+    let repo = init(&root, "cycle");
+    branch_new(&repo, "left");
+    git(&repo, &["commit", "--allow-empty", "-qm", "left"]);
+    checkout(&repo, "develop");
+    branch_new(&repo, "right");
+    git(&repo, &["commit", "--allow-empty", "-qm", "right"]);
+    let out = plan(
+        &root,
+        r#"
+[[node]]
+id = "left"
+repo = "cycle"
+path = "cycle"
+base = "develop"
+branch = "left"
+needs = ["right"]
+
+[[node]]
+id = "right"
+repo = "cycle"
+path = "cycle"
+base = "develop"
+branch = "right"
+needs = ["left"]
+"#,
+        &[],
+    );
+    assert_eq!(out.code, 3, "{}", out.report);
+    has(&out.report, "left");
+    has(&out.report, "right");
+    assert!(!out.script_path.exists());
+}
+
+fn m_rerun() {
+    let root = tmp();
+    let up = init(&root, "upstream");
+    write_file(&up, "src/lib.rs", "pub fn x() {}\n");
+    commit_all(&up, "new");
+    let (old, new) = same_tree(&up);
+    let tree = rev(&up, "HEAD^{tree}");
+    branch_new(&up, "up");
+    let cons = init(&root, "consumer");
+    write_file(
+        &cons,
+        "Cargo.toml",
+        &cargo_pkg(
+            "consumer",
+            &format!("[dependencies]\nupstream = {{ git = \"https://github.com/example/upstream\", rev = \"{old}\" }}\n"),
+        ),
+    );
+    commit_all(&cons, "pin");
+    branch_new(&cons, "bump");
+    ahead(&cons);
+    fs::write(
+        root.join("run.toml"),
+        format!("[[done]]\nid = \"upstream\"\nlanded = true\nsha = \"{new}\"\ntree = \"{tree}\"\n"),
+    )
+    .unwrap();
+    let out = plan(
+        &root,
+        r#"
+[[node]]
+id = "upstream"
+repo = "upstream"
+path = "upstream"
+base = "develop"
+branch = "up"
+
+[[node]]
+id = "consumer"
+repo = "consumer"
+path = "consumer"
+base = "develop"
+branch = "bump"
+"#,
+        &["--run", root.join("run.toml").to_str().unwrap()],
+    );
+    assert_eq!(out.code, 0, "{}", out.report);
+    not_has(&out.script, "HEAD:'up'");
+    has(&out.script, "cargo update -p 'upstream'");
+    has(&out.script, &new);
+}
+
+fn m_ambig() {
+    let root = tmp();
+    let up = init(&root, "lib");
+    write_file(&up, "src/lib.rs", "pub fn x() {}\n");
+    commit_all(&up, "c");
+    let sha = rev(&up, "HEAD");
+    git(&up, &["branch", "alpha"]);
+    git(&up, &["branch", "beta"]);
+    git(&up, &["reset", "--hard", "HEAD~1"]);
+    let cons = init(&root, "consumer");
+    write_file(
+        &cons,
+        "Cargo.toml",
+        &cargo_pkg(
+            "consumer",
+            &format!("[dependencies]\nlib = {{ git = \"https://github.com/example/lib\", rev = \"{sha}\" }}\n"),
+        ),
+    );
+    commit_all(&cons, "pin");
+    branch_new(&cons, "bump");
+    ahead(&cons);
+    let out = plan(
+        &root,
+        r#"
+[[node]]
+id = "alpha"
+repo = "lib"
+path = "lib"
+base = "develop"
+branch = "alpha"
+
+[[node]]
+id = "beta"
+repo = "lib"
+path = "lib"
+base = "develop"
+branch = "beta"
+
+[[node]]
+id = "consumer"
+repo = "consumer"
+path = "consumer"
+base = "develop"
+branch = "bump"
+"#,
+        &[],
+    );
+    assert_eq!(out.code, 2, "{}", out.report);
+    has(&out.report, "alpha");
+    has(&out.report, "beta");
+    assert!(!out.script_path.exists());
 }

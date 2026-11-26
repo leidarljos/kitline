@@ -16,6 +16,8 @@ pub struct Workspace {
     #[serde(default)]
     pub fix_sha: Vec<String>,
     #[serde(default)]
+    pub metadata_rev: Vec<String>,
+    #[serde(default)]
     pub claim: Vec<Claim>,
     #[serde(default)]
     pub contract: Vec<Contract>,

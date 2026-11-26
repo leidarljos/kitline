@@ -19,7 +19,7 @@ pub struct Pin {
     pub path_dep: bool,
 }
 
-pub fn scan_rev(dir: &Path, rev: &str) -> Vec<Pin> {
+pub fn scan_rev(dir: &Path, rev: &str, metadata_rev: &[String]) -> Vec<Pin> {
     let mut out = Vec::new();
     for file in gitutil::list_files(dir, rev) {
         if file == ".cargo/config.toml" || file.ends_with("/.cargo/config.toml") {
@@ -32,7 +32,7 @@ pub fn scan_rev(dir: &Path, rev: &str) -> Vec<Pin> {
             scan_zon(&text, &file, &mut out);
         } else if file == "Cargo.toml" || file.ends_with("/Cargo.toml") {
             let root = file == "Cargo.toml";
-            scan_cargo(&text, &file, root, &mut out);
+            scan_cargo(&text, &file, root, metadata_rev, &mut out);
         } else if file.ends_with(".wrap") {
             scan_wrap(&text, &file, &mut out);
         }
@@ -113,11 +113,14 @@ fn classify_zig(url: &str) -> (String, String, String) {
     ("commit".into(), String::new(), String::new())
 }
 
-fn scan_cargo(text: &str, file: &str, root: bool, out: &mut Vec<Pin>) {
+fn scan_cargo(text: &str, file: &str, root: bool, metadata_rev: &[String], out: &mut Vec<Pin>) {
     let value: toml::Value = match toml::from_str(text) {
         Ok(v) => v,
         Err(_) => return,
     };
+    if !metadata_rev.is_empty() {
+        scan_metadata(&value, text, file, root, metadata_rev, out);
+    }
     for section in ["dependencies", "dev-dependencies", "build-dependencies"] {
         if let Some(table) = value.get(section).and_then(|v| v.as_table()) {
             for (name, dep) in table {
@@ -149,6 +152,7 @@ fn push_dep(
 ) {
     let mut git = String::new();
     let mut rev = String::new();
+    let mut branch = String::new();
     let mut version = String::new();
     let mut path_dep = false;
     match dep {
@@ -160,6 +164,9 @@ fn push_dep(
             if let Some(v) = t.get("rev").and_then(|x| x.as_str()) {
                 rev = v.to_string();
             }
+            if let Some(v) = t.get("branch").and_then(|x| x.as_str()) {
+                branch = v.to_string();
+            }
             if let Some(v) = t.get("version").and_then(|x| x.as_str()) {
                 version = v.to_string();
             }
@@ -170,7 +177,7 @@ fn push_dep(
     let line = line_of(text, &rev)
         .or_else(|| line_of(text, name))
         .unwrap_or(1);
-    if !git.is_empty() {
+    if !git.is_empty() && !rev.is_empty() {
         out.push(Pin {
             file: file.to_string(),
             line,
@@ -178,6 +185,25 @@ fn push_dep(
             dep: name.to_string(),
             spec: format!("commit {rev}"),
             sha: rev,
+            version,
+            url: git,
+            depth: String::new(),
+            diff_files: Vec::new(),
+            section: section.to_string(),
+            root,
+            raw_hash: String::new(),
+            path_dep: false,
+        });
+        return;
+    }
+    if !git.is_empty() && !branch.is_empty() {
+        out.push(Pin {
+            file: file.to_string(),
+            line,
+            family: "cargo".into(),
+            dep: name.to_string(),
+            spec: format!("branch {branch}"),
+            sha: String::new(),
             version,
             url: git,
             depth: String::new(),
@@ -225,6 +251,54 @@ fn push_dep(
             raw_hash: String::new(),
             path_dep: false,
         });
+    }
+}
+
+fn scan_metadata(
+    value: &toml::Value,
+    text: &str,
+    file: &str,
+    root: bool,
+    keys: &[String],
+    out: &mut Vec<Pin>,
+) {
+    let Some(table) = value.as_table() else {
+        return;
+    };
+    for (key, child) in table {
+        if keys.iter().any(|k| k == key) {
+            if let Some(raw) = child.as_str() {
+                let sha = raw.trim();
+                let hex = sha.chars().all(|c| c.is_ascii_hexdigit());
+                if hex && (sha.len() == 8 || sha.len() == 40) {
+                    let git_key = key.strip_suffix("-rev").map(|p| format!("{p}-git"));
+                    let url = git_key
+                        .as_ref()
+                        .and_then(|name| table.get(name))
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    let dep = key.strip_suffix("-rev").unwrap_or(key).to_string();
+                    out.push(Pin {
+                        file: file.to_string(),
+                        line: line_of(text, sha).unwrap_or(1),
+                        family: "cargo".into(),
+                        dep,
+                        spec: format!("commit {sha}"),
+                        sha: sha.to_string(),
+                        version: String::new(),
+                        url,
+                        depth: String::new(),
+                        diff_files: Vec::new(),
+                        section: "metadata".into(),
+                        root,
+                        raw_hash: String::new(),
+                        path_dep: false,
+                    });
+                }
+            }
+        }
+        scan_metadata(child, text, file, root, keys, out);
     }
 }
 

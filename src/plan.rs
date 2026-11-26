@@ -194,7 +194,7 @@ fn build(cli: &Cli) -> Result<Report, String> {
             continue;
         }
         notes.extend(branch_pin_notes(&lives[i].dir));
-        let found = scan::scan_rev(&lives[i].dir, &lives[i].head_sha);
+        let found = scan::scan_rev(&lives[i].dir, &lives[i].head_sha, &ws.metadata_rev);
         let consumer = lives[i].id.clone();
         let private = lives[i].private;
         for pin in found {
@@ -799,6 +799,153 @@ fn scan_depends(lives: &[Live], edges: &mut Vec<(String, String, String)>) {
     }
 }
 
+enum PinSha {
+    Unique(String),
+    Missing,
+    Ambiguous,
+}
+
+fn resolve_pin_sha(dir: &Path, sha: &str) -> PinSha {
+    let short = sha.len() == 8 && sha.chars().all(|c| c.is_ascii_hexdigit());
+    if short {
+        let out = gitutil::git(dir, &["rev-parse", &format!("--disambiguate={sha}")]);
+        let mut commits = Vec::new();
+        for line in out.stdout.lines() {
+            let name = line.trim();
+            if name.is_empty() {
+                continue;
+            }
+            if gitutil::rev(dir, &format!("{name}^{{commit}}")).as_deref() == Some(name) {
+                commits.push(name.to_string());
+            }
+        }
+        return match commits.len() {
+            0 => PinSha::Missing,
+            1 => PinSha::Unique(commits.pop().unwrap_or_default()),
+            _ => PinSha::Ambiguous,
+        };
+    }
+    match gitutil::rev(dir, sha) {
+        Some(full) => PinSha::Unique(full),
+        None => PinSha::Missing,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn match_branch(
+    run: &RunFile,
+    lives: &[Live],
+    consumer_idx: usize,
+    pin: &Pin,
+    branch: &str,
+    edges: &mut Vec<(String, String, String)>,
+    rewrites: &mut Vec<Rewrite>,
+    notes: &mut Vec<String>,
+    exit2: &mut bool,
+    reasons: &mut Vec<String>,
+) {
+    if branch.is_empty() {
+        return;
+    }
+    let slug = scan::slug(&pin.url);
+    let ups: Vec<usize> = (0..lives.len())
+        .filter(|i| slug_hit(&lives[*i], &slug, &pin.url))
+        .collect();
+    if ups.is_empty() {
+        notes.push(format!("pin unmatched: {}", pin.dep));
+        return;
+    }
+    let cid = lives[consumer_idx].id.clone();
+    let floating = ups
+        .iter()
+        .any(|&i| lives[i].kind != "gate" && lives[i].base_ref == branch);
+    if floating {
+        let mut linked = false;
+        for i in &ups {
+            let n = &lives[*i];
+            if n.kind == "gate" || n.base_ref != branch || n.branch == branch || n.branch.is_empty()
+            {
+                continue;
+            }
+            add_edge(edges, &n.id, &cid, "branch");
+            linked = true;
+        }
+        if linked {
+            let kind = if pin.family == "zig" { "zig" } else { "cargo" };
+            rewrites.push(Rewrite {
+                consumer: cid,
+                kind: kind.into(),
+                dep: pin.dep.clone(),
+                old: String::new(),
+                new_sha: String::new(),
+                file: pin.file.clone(),
+                extra: Vec::new(),
+                depth: String::new(),
+                url: pin.url.clone(),
+                recipes: Vec::new(),
+            });
+        }
+        return;
+    }
+    let topics: Vec<usize> = ups
+        .iter()
+        .copied()
+        .filter(|&i| lives[i].kind != "gate" && lives[i].branch == branch)
+        .collect();
+    if topics.len() > 1 {
+        *exit2 = true;
+        let ids: Vec<&str> = topics.iter().map(|i| lives[*i].id.as_str()).collect();
+        let line = format!("ambiguous: {}", ids.join(" "));
+        reasons.push(line.clone());
+        notes.push(line);
+        return;
+    }
+    let Some(up) = topics.first().copied() else {
+        return;
+    };
+    let landed = landed_sha(&lives[up], run);
+    let gid = lives[up].id.clone();
+    let kind = if pin.family == "zig" { "zig" } else { "cargo" };
+    add_edge(edges, &gid, &cid, kind);
+    if landed.is_empty() {
+        return;
+    }
+    rewrites.push(Rewrite {
+        consumer: cid,
+        kind: "branch-sha".into(),
+        dep: pin.dep.clone(),
+        old: branch.to_string(),
+        new_sha: landed,
+        file: pin.file.clone(),
+        extra: Vec::new(),
+        depth: String::new(),
+        url: String::new(),
+        recipes: Vec::new(),
+    });
+}
+
+fn sh_commit(lines: &mut Vec<String>, paths: &[String], message: &str) {
+    if paths.is_empty() {
+        return;
+    }
+    let listed = paths
+        .iter()
+        .map(|p| sh_quote(p))
+        .collect::<Vec<_>>()
+        .join(" ");
+    lines.push(format!("git add -- {listed}"));
+    lines.push(format!(
+        "if ! git diff --cached --quiet; then git commit -m {}; fi",
+        sh_quote(message)
+    ));
+}
+
+fn sh_replace(lines: &mut Vec<String>, expr: &str, file: &str) {
+    let q = sh_quote(file);
+    lines.push(format!("sed {} {q} > {q}.new", sh_quote(expr)));
+    lines.push(format!("mv {q}.new {q}"));
+}
+
 #[allow(clippy::too_many_arguments)]
 fn match_pin(
     ws: &Workspace,
@@ -876,7 +1023,19 @@ fn match_pin(
         }
         return;
     }
-    if pin.spec.starts_with("branch ") {
+    if let Some(branch) = pin.spec.strip_prefix("branch ") {
+        match_branch(
+            run,
+            lives,
+            consumer_idx,
+            pin,
+            branch.trim(),
+            edges,
+            rewrites,
+            notes,
+            exit2,
+            reasons,
+        );
         return;
     }
     if pin.spec.starts_with("tag ")
@@ -930,12 +1089,20 @@ fn match_pin(
         return;
     }
     let dir = lives[ups[0]].dir.clone();
-    let full = gitutil::rev(&dir, &pin.sha);
-    let Some(full) = full else {
-        lives[consumer_idx]
-            .refused
-            .push(format!("pin sha absent {}", pin.sha));
-        return;
+    let full = match resolve_pin_sha(&dir, &pin.sha) {
+        PinSha::Unique(full) => full,
+        PinSha::Missing => {
+            lives[consumer_idx]
+                .refused
+                .push(format!("pin sha absent {}", pin.sha));
+            return;
+        }
+        PinSha::Ambiguous => {
+            *exit2 = true;
+            reasons.push(format!("ambiguous: {}", pin.sha));
+            notes.push(format!("ambiguous: {}", pin.sha));
+            return;
+        }
     };
     if online {
         let out = gitutil::git(&dir, &["ls-remote", "origin", &full]);
@@ -1117,7 +1284,9 @@ fn match_pin(
             pin.depth
         ));
     }
-    let rewrite_kind = if pin.family == "meson" {
+    let rewrite_kind = if pin.section == "metadata" {
+        "meta"
+    } else if pin.family == "meson" {
         "meson"
     } else if pin.family == "zig" {
         "zig"
@@ -1131,7 +1300,11 @@ fn match_pin(
         consumer: cid.clone(),
         kind: rewrite_kind.into(),
         dep: pin.dep.clone(),
-        old: full,
+        old: if pin.sha.is_empty() {
+            full.clone()
+        } else {
+            pin.sha.clone()
+        },
         new_sha: landed.clone(),
         file: pin.file.clone(),
         extra,
@@ -1714,37 +1887,24 @@ fn block_lines(n: &Live, rewrites: &[Rewrite], ws: &Workspace) -> Vec<String> {
         return lines;
     }
     if n.sync == "no-ff" && !n.base_ref.is_empty() {
-        lines.push(format!("git merge --no-ff {}", n.base_ref));
+        lines.push(format!("git merge --no-ff {}", sh_quote(&n.base_ref)));
     }
     for rw in rewrites.iter().filter(|r| r.consumer == n.id) {
         match rw.kind.as_str() {
             "cargo" => {
-                lines.push(format!("cargo update -p {}", rw.dep));
+                lines.push(format!("cargo update -p {}", sh_quote(&rw.dep)));
                 let mut paths = vec![rw.file.clone()];
                 paths.extend(rw.extra.clone());
                 if !rw.old.is_empty() && !rw.new_sha.is_empty() {
+                    let expr = format!("s/{}/{}/g", rw.old, rw.new_sha);
                     for p in &paths {
-                        let q = sh_quote(p);
-                        lines.push(format!(
-                            "sed \"s/{}/{}/g\" {q} > {q}.new",
-                            rw.old, rw.new_sha
-                        ));
-                        lines.push(format!("mv {q}.new {q}"));
+                        sh_replace(&mut lines, &expr, p);
                     }
                 }
-                let listed = paths
-                    .iter()
-                    .map(|p| sh_quote(p))
-                    .collect::<Vec<_>>()
-                    .join(" ");
-                lines.push(format!("git add -- {listed}"));
-                lines.push(format!(
-                    "git commit -m {}",
-                    sh_quote(&format!("bump {}", rw.dep))
-                ));
+                sh_commit(&mut lines, &paths, &format!("bump {}", rw.dep));
             }
             "cargo-ver" => {
-                lines.push(format!("cargo update -p {}", rw.dep));
+                lines.push(format!("cargo update -p {}", sh_quote(&rw.dep)));
             }
             "zig" => {
                 let url = if rw.url.is_empty() {
@@ -1752,41 +1912,46 @@ fn block_lines(n: &Live, rewrites: &[Rewrite], ws: &Workspace) -> Vec<String> {
                 } else {
                     format!(" {}", sh_quote(&rw.url))
                 };
-                lines.push(format!("zig fetch --save={}{url}", rw.dep));
-                lines.push(format!("git add -- {}", sh_quote(&rw.file)));
-                lines.push(format!(
-                    "git commit -m {}",
-                    sh_quote(&format!("bump {}", rw.dep))
-                ));
+                lines.push(format!("zig fetch --save={}{url}", sh_quote(&rw.dep)));
+                sh_commit(
+                    &mut lines,
+                    std::slice::from_ref(&rw.file),
+                    &format!("bump {}", rw.dep),
+                );
             }
             "meson" => {
-                let q = sh_quote(&rw.file);
                 if !rw.depth.is_empty() {
-                    lines.push(format!("# depth = {}", rw.depth));
+                    lines.push(format!("# depth = {}", sh_quote(&rw.depth)));
                 }
-                lines.push(format!(
-                    "sed \"s/^revision = .*/revision = {}/\" {q} > {q}.new",
-                    rw.new_sha
-                ));
-                lines.push(format!("mv {q}.new {q}"));
+                let expr = format!("s/^revision = .*/revision = {}/", rw.new_sha);
+                sh_replace(&mut lines, &expr, &rw.file);
+                sh_commit(
+                    &mut lines,
+                    std::slice::from_ref(&rw.file),
+                    &format!("bump {}", rw.dep),
+                );
             }
             "hash" => {
                 if let Some(cmd) = &ws.hash_command {
-                    lines.push(format!("{cmd} {}", sh_quote(&rw.file)));
+                    lines.push(format!("{} {}", sh_quote(cmd), sh_quote(&rw.file)));
+                    sh_commit(
+                        &mut lines,
+                        std::slice::from_ref(&rw.file),
+                        &format!("bump {}", rw.dep),
+                    );
                 }
             }
             "drop-diff" => {
-                let q = sh_quote(&rw.file);
-                lines.push(format!("sed '/^diff_files/d' {q} > {q}.new"));
-                lines.push(format!("mv {q}.new {q}"));
+                sh_replace(&mut lines, "/^diff_files/d", &rw.file);
+                let mut paths = vec![rw.file.clone()];
                 for recipe in &rw.recipes {
-                    let rq = sh_quote(recipe);
                     for name in &rw.extra {
                         let base = name.rsplit('/').next().unwrap_or(name);
-                        lines.push(format!("sed '/{base}/d' {rq} > {rq}.new"));
-                        lines.push(format!("mv {rq}.new {rq}"));
+                        sh_replace(&mut lines, &format!("/{base}/d"), recipe);
                     }
+                    paths.push(recipe.clone());
                 }
+                sh_commit(&mut lines, &paths, &format!("bump {}", rw.dep));
             }
             "drop-table" => {
                 lines.push(
@@ -1797,6 +1962,24 @@ fn block_lines(n: &Live, rewrites: &[Rewrite], ws: &Workspace) -> Vec<String> {
                 lines.push("git add -- Cargo.toml".into());
                 lines.push("git commit -m 'drop patch'".into());
             }
+            "branch-sha" => {
+                let expr = format!("s|branch = \"{}\"|rev = \"{}\"|", rw.old, rw.new_sha);
+                sh_replace(&mut lines, &expr, &rw.file);
+                sh_commit(
+                    &mut lines,
+                    std::slice::from_ref(&rw.file),
+                    &format!("bump {}", rw.dep),
+                );
+            }
+            "meta" => {
+                let expr = format!("s/{}/{}/g", rw.old, rw.new_sha);
+                sh_replace(&mut lines, &expr, &rw.file);
+                sh_commit(
+                    &mut lines,
+                    std::slice::from_ref(&rw.file),
+                    &format!("bump {}", rw.dep),
+                );
+            }
             _ => {}
         }
     }
@@ -1804,14 +1987,15 @@ fn block_lines(n: &Live, rewrites: &[Rewrite], ws: &Workspace) -> Vec<String> {
         let head = sh_quote(&n.branch);
         let base = sh_quote(&n.base_ref);
         lines.push(format!(
-            "gh pr list --head {head} --base {base} --json number"
+            "if ! gh pr list --head {head} --base {base} --json number | grep -q '\"number\"'; then"
         ));
         lines.push(format!(
             "gh pr create --head {head} --base {base} --title {head}"
         ));
+        lines.push("fi".into());
     }
     if n.land && n.kind != "gate" && !n.branch.is_empty() {
-        lines.push(format!("git push origin HEAD:{}", n.branch));
+        lines.push(format!("git push origin HEAD:{}", sh_quote(&n.branch)));
     }
     lines
 }
