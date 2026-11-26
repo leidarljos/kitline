@@ -501,3 +501,242 @@ branch = "feat/md-session-nblib-r3"
     not_has(&out.script, "branch -D");
 }
 
+#[test]
+fn step_03_zig_and_cargo_pins() {
+    let root = tmp();
+    let zig = init(&root, "zig-common");
+    write_file(&zig, "src/root.zig", "pub const x = 1;\n");
+    commit_all(&zig, "lib");
+    let bare = rev(&zig, "HEAD");
+    git(&zig, &["tag", "v0.9.0"]);
+    let dev_sha = bare.clone();
+    branch_new(&zig, "main");
+    write_file(&zig, "src/root.zig", "pub const x = 2;\n");
+    commit_all(&zig, "mainline");
+    let main_sha = rev(&zig, "HEAD");
+    checkout(&zig, "develop");
+
+    let cons = init(&root, "eb-staged");
+    let hash = "1220deadbeefdeadbeefdeadbeefdeadbeefdeadbeef";
+    let zon = |bare_sha: &str| {
+        format!(
+            r#"
+.{{
+    .name = .eb_staged,
+    .version = "0.1.0",
+    .dependencies = .{{
+        .tagged = .{{ .url = "git+https://github.com/eessi/zig-common?ref=v0.9.0", .hash = "{hash}", }},
+        .on_main = .{{ .url = "git+https://github.com/eessi/zig-common?ref=main#{main_sha}", .hash = "{hash}", }},
+        .on_develop = .{{ .url = "git+https://github.com/eessi/zig-common?ref=develop#{dev_sha}", .hash = "{hash}", }},
+        .bare = .{{ .url = "git+https://github.com/eessi/zig-common#{bare_sha}", .hash = "{hash}", }},
+        .zig_common = .{{ .url = "git+https://github.com/eessi/zig-common?ref=v0.10.0", .hash = "{hash}", }},
+    }},
+}}
+"#
+        )
+    };
+    write_file(&cons, "build.zig.zon", &zon(&dev_sha));
+    commit_all(&cons, "develop zon");
+    branch_new(&cons, "main");
+    write_file(&cons, "build.zig.zon", &zon(&main_sha));
+    commit_all(&cons, "main zon");
+    checkout(&cons, "develop");
+    branch_new(&cons, "bump");
+    ahead(&cons);
+
+    let ws = r#"
+[[node]]
+id = "zig-v010"
+kind = "gate"
+gate = "tag"
+repo = "zig-common"
+path = "zig-common"
+tag = "v0.10.0"
+
+[[node]]
+id = "eb-staged"
+repo = "eb-staged"
+path = "eb-staged"
+base = "develop"
+branch = "bump"
+"#;
+    let pending = plan(&root, ws, &[]);
+    assert_eq!(pending.code, 0, "{}", pending.report);
+    has(&pending.report, "spec: tag v0.9.0");
+    has(&pending.report, "spec: branch main");
+    has(&pending.report, "spec: branch develop");
+    has(&pending.report, &format!("spec: commit {bare}"));
+    has(&pending.report, &format!("develop pin: {dev_sha}"));
+    has(&pending.report, &format!("main pin: {main_sha}"));
+    has(&pending.script, "v0.10.0 is not present");
+    not_has(&pending.script, "zig fetch");
+
+    git(&zig, &["tag", "v0.10.0"]);
+    let ready = plan(&root, ws, &[]);
+    assert_eq!(ready.code, 0, "{}", ready.report);
+    has(&ready.script, "zig fetch --save=zig_common");
+    not_has(&ready.script, hash);
+    not_has(&ready.script, "is not present");
+
+    let root = tmp();
+    let ridley = init(&root, "ridley");
+    write_file(&ridley, "src/lib.rs", "pub fn core() {}\n");
+    commit_all(&ridley, "core");
+    let (old, new) = same_tree(&ridley);
+    branch_new(&ridley, "main");
+    write_file(&ridley, "src/lib.rs", "pub fn fix() {}\n");
+    commit_all(&ridley, "fix");
+    let fix = rev(&ridley, "HEAD");
+    git(&ridley, &["update-ref", "refs/heads/develop", &new]);
+    git(&ridley, &["update-ref", "refs/heads/main", &new]);
+    checkout(&ridley, "develop");
+
+    let desk = init(&root, "desktop");
+    write_file(
+        &desk,
+        "Cargo.toml",
+        &cargo_pkg(
+            "desktop",
+            &format!("[dependencies]\nridley-core = {{ git = \"https://github.com/ttech/ridley\", rev = \"{old}\" }}\n"),
+        ),
+    );
+    write_file(&desk, "Cargo.lock", &format!("ridley-core {old}\n"));
+    write_file(&desk, "ridley-core.rev", &format!("{old}\n"));
+    commit_all(&desk, "pin");
+    branch_new(&desk, "desk");
+    ahead(&desk);
+
+    let bad = init(&root, "badcomp");
+    write_file(
+        &bad,
+        "Cargo.toml",
+        &cargo_pkg(
+            "badcomp",
+            &format!("[dependencies]\nridley-core = {{ git = \"https://github.com/ttech/ridley\", rev = \"{old}\" }}\n"),
+        ),
+    );
+    write_file(
+        &bad,
+        "ridley-core.rev",
+        "ffffffffffffffffffffffffffffffffffffffff\n",
+    );
+    commit_all(&bad, "bad");
+    branch_new(&bad, "bad");
+    ahead(&bad);
+
+    let missing_sha = "0123456789abcdef0123456789abcdef01234567";
+    let miss = init(&root, "missing");
+    write_file(
+        &miss,
+        "Cargo.toml",
+        &cargo_pkg(
+            "missing",
+            &format!("[dependencies]\nridley-core = {{ git = \"https://github.com/ttech/ridley\", rev = \"{missing_sha}\" }}\n"),
+        ),
+    );
+    commit_all(&miss, "miss");
+    branch_new(&miss, "missing");
+    ahead(&miss);
+
+    let fixc = init(&root, "fixpin");
+    write_file(
+        &fixc,
+        "Cargo.toml",
+        &cargo_pkg(
+            "fixpin",
+            &format!("[dependencies]\nridley-core = {{ git = \"https://github.com/ttech/ridley\", rev = \"{fix}\" }}\n"),
+        ),
+    );
+    commit_all(&fixc, "fix");
+    branch_new(&fixc, "fixpin");
+    ahead(&fixc);
+
+    let wsrepo = init(&root, "ws");
+    write_file(
+        &wsrepo,
+        "Cargo.toml",
+        &format!(
+            "[workspace]\nmembers = [\"crates/extra\"]\n\n[patch.crates-io]\nlinkcell = {{ git = \"https://github.com/ttech/ridley\", rev = \"{old}\" }}\n"
+        ),
+    );
+    write_file(
+        &wsrepo,
+        "crates/extra/Cargo.toml",
+        &format!(
+            "[package]\nname = \"extra\"\nversion = \"0.1.0\"\n\n[patch.crates-io]\nother = {{ git = \"https://github.com/ttech/ridley\", rev = \"{old}\" }}\n"
+        ),
+    );
+    commit_all(&wsrepo, "ws");
+
+    let ws = format!(
+        r#"
+fix_sha = ["{fix}"]
+
+[[node]]
+id = "ridley"
+repo = "ridley"
+path = "ridley"
+base = "develop"
+branch = "main"
+
+[[node]]
+id = "desktop"
+repo = "desktop"
+path = "desktop"
+base = "develop"
+branch = "desk"
+companions = ["ridley-core.rev"]
+
+[[node]]
+id = "badcomp"
+repo = "badcomp"
+path = "badcomp"
+base = "develop"
+branch = "bad"
+companions = ["ridley-core.rev"]
+
+[[node]]
+id = "missing"
+repo = "missing"
+path = "missing"
+base = "develop"
+branch = "missing"
+
+[[node]]
+id = "fixpin"
+repo = "fixpin"
+path = "fixpin"
+base = "develop"
+branch = "fixpin"
+
+[[node]]
+id = "ws"
+repo = "ws"
+path = "ws"
+base = "develop"
+branch = "develop"
+"#
+    );
+    let out = plan(&root, &ws, &[]);
+    assert_eq!(out.code, 0, "{}", out.report);
+    has(&out.script, "cargo update -p ridley-core");
+    has(&out.script, &new);
+    let add = out
+        .script
+        .lines()
+        .find(|l| {
+            l.contains("Cargo.toml") && l.contains("Cargo.lock") && l.contains("ridley-core.rev")
+        })
+        .unwrap_or("");
+    assert!(!add.is_empty(), "{}", out.script);
+    has(&out.report, "ignored: crates/extra/Cargo.toml");
+    has(&out.report, "rewrite: Cargo.toml");
+    not_has(&out.script, "crates/extra/Cargo.toml");
+    has(&out.report, "companions disagree");
+    has(&out.report, "pin sha absent");
+    has(&out.report, "fix sha");
+    not_has(&out.script, "HEAD:bad");
+    not_has(&out.script, "HEAD:missing");
+    not_has(&out.script, "HEAD:fixpin");
+}
+
