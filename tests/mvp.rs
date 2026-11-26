@@ -1996,15 +1996,11 @@ fn bare_at(dir: &Path, bare: &Path) {
 fn quoted_workspace_value_does_not_run() {
     let root = tmp();
     let repo = init(&root, "box");
+    let mark = root.join("pwned");
+    let nasty = format!("it's$(>{})", mark.display());
+    git(&repo, &["branch", &nasty]);
     branch_new(&repo, "land");
     git(&repo, &["commit", "--allow-empty", "-qm", "land"]);
-    let mark = root.join("pwned");
-    let mark2 = root.join("pwned2");
-    let nasty = format!(
-        "pre $(touch {}) `touch {}` it's",
-        mark.display(),
-        mark2.display()
-    );
     let ws = format!(
         r#"
 [[node]]
@@ -2024,15 +2020,58 @@ sync = "no-ff"
         .status()
         .unwrap();
     assert!(syntax.success(), "{}", out.script);
-    assert!(
-        !out.script.contains("git merge --no-ff pre "),
-        "{}",
-        out.script
+    has(
+        &out.script,
+        &format!("git merge --no-ff 'it'\\''s$(>{})'", mark.display()),
     );
     let ran = Command::new("sh").arg(&out.script_path).status().unwrap();
     assert!(!ran.success());
     assert!(!mark.exists(), "payload ran\n{}", out.script);
-    assert!(!mark2.exists(), "payload ran\n{}", out.script);
+}
+
+#[test]
+fn unresolved_base_emits_no_push() {
+    let root = tmp();
+    let repo = init(&root, "box");
+    branch_new(&repo, "land");
+    git(&repo, &["commit", "--allow-empty", "-qm", "land"]);
+    let named = plan(
+        &root,
+        r#"
+[[node]]
+id = "box"
+repo = "box"
+path = "box"
+base = "missing-base"
+branch = "land"
+"#,
+        &[],
+    );
+    assert_eq!(named.code, 0, "{}", named.report);
+    has(&named.report, "unresolved base missing-base");
+    not_has(&named.script, "git push");
+    assert!(!named.script_path.exists());
+
+    let known = rev(&repo, "develop");
+    let pinned = plan(
+        &root,
+        &format!(
+            r#"
+[[node]]
+id = "box"
+repo = "box"
+path = "box"
+base = "missing-base"
+base_commit = "{known}"
+branch = "land"
+"#
+        ),
+        &[],
+    );
+    assert_eq!(pinned.code, 0, "{}", pinned.report);
+    has(&pinned.report, "unresolved base missing-base");
+    not_has(&pinned.script, "git push");
+    not_has(&pinned.report, "ancestor failure");
 }
 
 #[test]

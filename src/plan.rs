@@ -640,6 +640,9 @@ fn pass_refusals(lives: &mut [Live]) {
                 ));
             }
         }
+        if !n.base_ref.is_empty() && n.target_sha.is_empty() {
+            n.refused.push(format!("unresolved base {}", n.base_ref));
+        }
         if !n.base_sha.is_empty()
             && !n.target_sha.is_empty()
             && !gitutil::is_ancestor(&n.dir, &n.base_sha, &n.target_sha)
