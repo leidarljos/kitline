@@ -1966,8 +1966,21 @@ fn block_lines(n: &Live, rewrites: &[Rewrite], ws: &Workspace) -> Vec<String> {
                 lines.push("git commit -m 'drop patch'".into());
             }
             "branch-sha" => {
-                let expr = format!("s|branch = \"{}\"|rev = \"{}\"|", rw.old, rw.new_sha);
-                sh_replace(&mut lines, &expr, &rw.file);
+                let spec = format!("{}:{}", n.head_sha, rw.file);
+                let shown = gitutil::git(&n.dir, &["show", &spec]);
+                let current = if shown.status == 0 {
+                    shown.stdout
+                } else {
+                    String::new()
+                };
+                let from = format!("branch = \"{}\"", rw.old);
+                let to = format!("rev = \"{}\"", rw.new_sha);
+                let rewritten = current.replace(&from, &to);
+                lines.push(format!(
+                    "printf '%s' {} > {}",
+                    sh_quote(&rewritten),
+                    sh_quote(&rw.file)
+                ));
                 sh_commit(
                     &mut lines,
                     std::slice::from_ref(&rw.file),
@@ -2001,4 +2014,129 @@ fn block_lines(n: &Live, rewrites: &[Rewrite], ws: &Workspace) -> Vec<String> {
         lines.push(format!("git push origin HEAD:{}", sh_quote(&n.branch)));
     }
     lines
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::Workspace;
+
+    fn live_at(dir: &Path, sha: &str) -> Live {
+        Live {
+            id: "anneal".into(),
+            kind: "kit".into(),
+            repo: "anneal".into(),
+            dir: dir.to_path_buf(),
+            branch: "bump".into(),
+            base_ref: "develop".into(),
+            base_sha: sha.into(),
+            target_sha: sha.into(),
+            head_sha: sha.into(),
+            tree: String::new(),
+            lease: sha.into(),
+            lease_ok: true,
+            claimed_tree: String::new(),
+            ahead: 1,
+            behind: 0,
+            have_counts: true,
+            mt_clean: true,
+            mt_files: Vec::new(),
+            pr: None,
+            pr_state: String::new(),
+            base_pr: None,
+            base_pr_state: String::new(),
+            private: false,
+            land: false,
+            open_pr: false,
+            fix: false,
+            drop: false,
+            merge: String::new(),
+            sync: String::new(),
+            needs: Vec::new(),
+            supersedes: String::new(),
+            superseded_by: String::new(),
+            companions: Vec::new(),
+            generated: Vec::new(),
+            gate: String::new(),
+            tag: String::new(),
+            crate_name: String::new(),
+            version: String::new(),
+            url: String::new(),
+            refused: Vec::new(),
+            notes: Vec::new(),
+            keep_head: Vec::new(),
+            done: false,
+            suppress: false,
+        }
+    }
+
+    #[test]
+    fn branch_rewrite_keeps_hostile_ref_text() {
+        let dir = std::env::temp_dir().join(format!(
+            "kitline-branch-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let git = |args: &[&str]| {
+            let out = Command::new("git")
+                .args(args)
+                .current_dir(&dir)
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "{args:?} {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        };
+        git(&["init", "-q", "-b", "develop"]);
+        git(&["config", "user.email", "rgoswami@ieee.org"]);
+        git(&["config", "user.name", "Rohit Goswami"]);
+        git(&["config", "commit.gpgsign", "false"]);
+        let branch = "/&.|*[]\\\n";
+        let body = format!("branch = \"{branch}\"\n");
+        fs::write(dir.join("Cargo.toml"), &body).unwrap();
+        git(&["add", "Cargo.toml"]);
+        git(&["commit", "-qm", "pin"]);
+        git(&["checkout", "-q", "-b", "bump"]);
+        let out = Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(&dir)
+            .output()
+            .unwrap();
+        let sha = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        let new_sha = "0123456789abcdef0123456789abcdef01234567";
+        let rw = Rewrite {
+            consumer: "anneal".into(),
+            kind: "branch-sha".into(),
+            dep: "topic".into(),
+            old: branch.to_string(),
+            new_sha: new_sha.into(),
+            file: "Cargo.toml".into(),
+            extra: Vec::new(),
+            depth: String::new(),
+            url: String::new(),
+            recipes: Vec::new(),
+        };
+        let ws: Workspace = toml::from_str("").unwrap();
+        let lines = block_lines(&live_at(&dir, &sha), &[rw], &ws);
+        let mut text = String::from("#!/bin/sh\nset -eu\n");
+        for line in &lines {
+            text.push_str(line);
+            text.push('\n');
+        }
+        assert!(!text.contains("sed "), "{text}");
+        let script = dir.join("run.sh");
+        fs::write(&script, &text).unwrap();
+        let ran = Command::new("sh").arg(&script).status().unwrap();
+        assert!(ran.success(), "{text}");
+        let got = fs::read_to_string(dir.join("Cargo.toml")).unwrap();
+        assert_eq!(got, format!("rev = \"{new_sha}\"\n"));
+        let _ = fs::remove_dir_all(&dir);
+    }
 }
