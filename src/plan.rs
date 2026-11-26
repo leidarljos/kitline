@@ -2003,8 +2003,9 @@ fn block_lines(n: &Live, rewrites: &[Rewrite], ws: &Workspace) -> Vec<String> {
         let head = sh_quote(&n.branch);
         let base = sh_quote(&n.base_ref);
         lines.push(format!(
-            "if ! gh pr list --head {head} --base {base} --json number | grep -q '\"number\"'; then"
+            "prs=$(gh pr list --head {head} --base {base} --state all --json number) || exit 1"
         ));
+        lines.push("if ! printf '%s\\n' \"$prs\" | grep -q '\"number\"'; then".into());
         lines.push(format!(
             "gh pr create --head {head} --base {base} --title {head}"
         ));

@@ -3619,3 +3619,108 @@ branch = "bump"
     has(&out.report, "beta");
     assert!(!out.script_path.exists());
 }
+
+#[test]
+fn pr_lookup_treats_any_state_and_stops_on_error() {
+    let root = tmp();
+    let repo = init(&root, "ttech");
+    branch_new(&repo, "land");
+    git(&repo, &["commit", "--allow-empty", "-qm", "land"]);
+    let out = plan(
+        &root,
+        r#"
+[[node]]
+id = "ttech"
+repo = "ttech"
+path = "ttech"
+base = "develop"
+branch = "land"
+open_pr = true
+"#,
+        &[],
+    );
+    assert_eq!(out.code, 0, "{}", out.report);
+    has(
+        &out.script,
+        "gh pr list --head 'land' --base 'develop' --state all --json number",
+    );
+    has(&out.script, "|| exit 1");
+    let list = out.script.find("gh pr list").unwrap();
+    let create = out.script.find("gh pr create").unwrap();
+    assert!(list < create, "{}", out.script);
+
+    let stub_dir = root.join("bin");
+    fs::create_dir_all(&stub_dir).unwrap();
+    let gh = stub_dir.join("gh");
+    fs::write(
+        &gh,
+        r#"#!/bin/sh
+set -eu
+state=open
+prev=
+for a in "$@"; do
+    if [ "$prev" = "--state" ]; then
+        state=$a
+    fi
+    prev=$a
+done
+if [ "$1" = pr ] && [ "$2" = list ]; then
+    if [ "$state" != all ]; then
+        printf '%s\n' '[]'
+        exit 0
+    fi
+    if [ "${FAIL:-}" = 1 ]; then
+        exit 1
+    fi
+    printf '%s\n' "$LIST"
+    exit 0
+fi
+if [ "$1" = pr ] && [ "$2" = create ]; then
+    touch "$MARK"
+    exit 0
+fi
+exit 0
+"#,
+    )
+    .unwrap();
+    mode_exec(&gh);
+    let path = format!("{}:{}", stub_dir.display(), std::env::var("PATH").unwrap());
+    let mark = root.join("created");
+    let run = |list: &str, fail: bool| {
+        let _ = fs::remove_file(&mark);
+        let mut cmd = Command::new("sh");
+        cmd.arg(&out.script_path)
+            .env("PATH", &path)
+            .env("LIST", list)
+            .env("MARK", &mark);
+        if fail {
+            cmd.env("FAIL", "1");
+        }
+        let status = cmd.status().unwrap();
+        (status.success(), mark.exists())
+    };
+    let (ok, created) = run(r#"[{"number":4,"state":"CLOSED"}]"#, false);
+    assert!(!ok);
+    assert!(
+        !created,
+        "create ran for a closed pull request\n{}",
+        out.script
+    );
+    let (ok, created) = run(r#"[{"number":5,"state":"MERGED"}]"#, false);
+    assert!(!ok);
+    assert!(
+        !created,
+        "create ran for a merged pull request\n{}",
+        out.script
+    );
+    let (ok, created) = run("[]", true);
+    assert!(!ok);
+    assert!(!created, "create ran after a failed lookup\n{}", out.script);
+    let (ok, created) = run("[]", false);
+    assert!(!ok);
+    assert!(
+        created,
+        "create did not run when no pull request exists\n{}",
+        out.script
+    );
+}
