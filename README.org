@@ -1,0 +1,37 @@
+#+title: kitline
+#+options: toc:nil num:nil ^:{}
+
+kitline reads one TOML workspace and writes an org report and a POSIX sh script.
+The script is the ready slice of a kit landing.
+kitline does not push, tag, publish, comment, or merge.
+=open_pr= is off unless a node sets it.
+
+* Run
+
+#+begin_src sh
+kitline --workspace workspace.toml --report plan.org --script plan.sh
+#+end_src
+
+Run kitline again after a node lands.
+A missing bundle prerequisite exits 1.
+An ambiguous pin, a schema mismatch, two claims of one value, or a private edge dropped from a public report exits 2.
+A cycle exits 3.
+
+* Example
+
+=tests/fixtures/example/init.sh= builds a local clone and a bundle.
+=tests/fixtures/example/workspace.toml= is the workspace.
+
+#+begin_src sh
+sh tests/fixtures/example/init.sh
+kitline --workspace tests/fixtures/example/workspace.toml --report plan.org --script plan.sh
+#+end_src
+
+* Workspace
+
+A node has an id, a repo path, a base, and a branch.
+A gate is a tag or a registry publish.
+Pins are read from =build.zig.zon=, Cargo manifests, and meson wrap files.
+A run file marks nodes that have already landed.
+=--tickets= is optional.
+=--online= is the only switch that may call =git ls-remote=.

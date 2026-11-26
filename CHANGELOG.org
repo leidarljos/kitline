@@ -1,0 +1,16 @@
+#+title: Changelog
+#+options: toc:nil num:nil ^:{}
+
+* 0.1.0
+
+A workspace file becomes an org report and a POSIX script for the ready slice.
+
+** Added
+
+- Kit lease, tree, and a fast-forward push line
+- Stale base, supersede, overlap, and a kept stacked head
+- Zig, Cargo, and Meson pin edges
+- Registry publish gates kept apart from tags
+- ABI, capnp, and schema claims
+- Patch, privacy, and trailer rules
+- Batch order, cycles, and a rerun after a landing
