@@ -927,9 +927,9 @@ fn match_branch(
     });
 }
 
-fn sh_commit(lines: &mut Vec<String>, paths: &[String], message: &str) {
+fn sh_commit(lines: &mut Vec<String>, paths: &[String], message: &str) -> bool {
     if paths.is_empty() {
-        return;
+        return false;
     }
     let listed = paths
         .iter()
@@ -941,6 +941,7 @@ fn sh_commit(lines: &mut Vec<String>, paths: &[String], message: &str) {
         "if ! git diff --cached --quiet; then git commit -m {}; fi",
         sh_quote(message)
     ));
+    true
 }
 
 fn sh_replace(lines: &mut Vec<String>, expr: &str, file: &str) {
@@ -1889,8 +1890,10 @@ fn block_lines(n: &Live, rewrites: &[Rewrite], ws: &Workspace) -> Vec<String> {
         ));
         return lines;
     }
+    let mut moved = false;
     if n.sync == "no-ff" && !n.base_ref.is_empty() {
         lines.push(format!("git merge --no-ff {}", sh_quote(&n.base_ref)));
+        moved = true;
     }
     for rw in rewrites.iter().filter(|r| r.consumer == n.id) {
         match rw.kind.as_str() {
@@ -1904,7 +1907,7 @@ fn block_lines(n: &Live, rewrites: &[Rewrite], ws: &Workspace) -> Vec<String> {
                         sh_replace(&mut lines, &expr, p);
                     }
                 }
-                sh_commit(&mut lines, &paths, &format!("bump {}", rw.dep));
+                moved |= sh_commit(&mut lines, &paths, &format!("bump {}", rw.dep));
             }
             "cargo-ver" => {
                 lines.push(format!("cargo update -p {}", sh_quote(&rw.dep)));
@@ -1916,7 +1919,7 @@ fn block_lines(n: &Live, rewrites: &[Rewrite], ws: &Workspace) -> Vec<String> {
                     format!(" {}", sh_quote(&rw.url))
                 };
                 lines.push(format!("zig fetch --save={}{url}", sh_quote(&rw.dep)));
-                sh_commit(
+                moved |= sh_commit(
                     &mut lines,
                     std::slice::from_ref(&rw.file),
                     &format!("bump {}", rw.dep),
@@ -1928,7 +1931,7 @@ fn block_lines(n: &Live, rewrites: &[Rewrite], ws: &Workspace) -> Vec<String> {
                 }
                 let expr = format!("s/^revision = .*/revision = {}/", rw.new_sha);
                 sh_replace(&mut lines, &expr, &rw.file);
-                sh_commit(
+                moved |= sh_commit(
                     &mut lines,
                     std::slice::from_ref(&rw.file),
                     &format!("bump {}", rw.dep),
@@ -1937,7 +1940,7 @@ fn block_lines(n: &Live, rewrites: &[Rewrite], ws: &Workspace) -> Vec<String> {
             "hash" => {
                 if let Some(cmd) = &ws.hash_command {
                     lines.push(format!("{} {}", sh_quote(cmd), sh_quote(&rw.file)));
-                    sh_commit(
+                    moved |= sh_commit(
                         &mut lines,
                         std::slice::from_ref(&rw.file),
                         &format!("bump {}", rw.dep),
@@ -1954,7 +1957,7 @@ fn block_lines(n: &Live, rewrites: &[Rewrite], ws: &Workspace) -> Vec<String> {
                     }
                     paths.push(recipe.clone());
                 }
-                sh_commit(&mut lines, &paths, &format!("bump {}", rw.dep));
+                moved |= sh_commit(&mut lines, &paths, &format!("bump {}", rw.dep));
             }
             "drop-table" => {
                 lines.push(
@@ -1964,6 +1967,7 @@ fn block_lines(n: &Live, rewrites: &[Rewrite], ws: &Workspace) -> Vec<String> {
                 lines.push("mv Cargo.toml.new Cargo.toml".into());
                 lines.push("git add -- Cargo.toml".into());
                 lines.push("git commit -m 'drop patch'".into());
+                moved = true;
             }
             "branch-sha" => {
                 let spec = format!("{}:{}", n.head_sha, rw.file);
@@ -1981,7 +1985,7 @@ fn block_lines(n: &Live, rewrites: &[Rewrite], ws: &Workspace) -> Vec<String> {
                     sh_quote(&rewritten),
                     sh_quote(&rw.file)
                 ));
-                sh_commit(
+                moved |= sh_commit(
                     &mut lines,
                     std::slice::from_ref(&rw.file),
                     &format!("bump {}", rw.dep),
@@ -1990,7 +1994,7 @@ fn block_lines(n: &Live, rewrites: &[Rewrite], ws: &Workspace) -> Vec<String> {
             "meta" => {
                 let expr = format!("s/{}/{}/g", rw.old, rw.new_sha);
                 sh_replace(&mut lines, &expr, &rw.file);
-                sh_commit(
+                moved |= sh_commit(
                     &mut lines,
                     std::slice::from_ref(&rw.file),
                     &format!("bump {}", rw.dep),
@@ -2011,8 +2015,32 @@ fn block_lines(n: &Live, rewrites: &[Rewrite], ws: &Workspace) -> Vec<String> {
         ));
         lines.push("fi".into());
     }
-    if n.land && n.kind != "gate" && !n.branch.is_empty() {
-        lines.push(format!("git push origin HEAD:{}", sh_quote(&n.branch)));
+    if n.land && n.kind != "gate" && !n.branch.is_empty() && !n.head_sha.is_empty() {
+        let branch_ref = format!("refs/heads/{}", n.branch);
+        lines.insert(
+            1,
+            format!(
+                "test \"$(git rev-parse --verify {})\" = {}",
+                sh_quote(&branch_ref),
+                sh_quote(&n.head_sha)
+            ),
+        );
+        if moved {
+            lines.insert(
+                2,
+                format!("git checkout --detach {}", sh_quote(&n.head_sha)),
+            );
+            lines.push(format!(
+                "spec=$(printf '%s:%s' \"$(git rev-parse --verify HEAD)\" {})",
+                sh_quote(&branch_ref)
+            ));
+            lines.push("git push origin \"$spec\"".into());
+        } else {
+            lines.push(format!(
+                "git push origin {}",
+                sh_quote(&format!("{}:{branch_ref}", n.head_sha))
+            ));
+        }
     }
     lines
 }

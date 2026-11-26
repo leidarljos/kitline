@@ -226,7 +226,7 @@ tree = "{empty}"
     );
     let out = plan(&root, &ws, &[]);
     assert_eq!(out.code, 0, "{}", out.report);
-    has(&out.script, "git push origin HEAD:'land'");
+    has(&out.script, "refs/heads/land'");
     not_has(&out.script, "--force");
     not_has(&out.script, "--no-verify");
     not_has(&out.script, "gh pr create");
@@ -490,11 +490,11 @@ branch = "feat/md-session-nblib-r3"
         "open-505 because stacked pull request rgpot-r3 still bases on it",
     );
     has(&out.report, "cargo clippy --all-targets --all-features");
-    has(&out.script, "HEAD:'feat-70'");
-    has(&out.script, "HEAD:'tica'");
+    has(&out.script, "refs/heads/feat-70'");
+    has(&out.script, "refs/heads/tica'");
     not_has(&out.script, "fix/dev-locked-rpath-wrappers");
-    not_has(&out.script, "HEAD:'old-66'");
-    not_has(&out.script, "HEAD:'r248'");
+    not_has(&out.script, "refs/heads/old-66'");
+    not_has(&out.script, "refs/heads/r248'");
     not_has(&out.script, "gh pr close");
     not_has(&out.script, "--delete");
     not_has(&out.script, "branch -d");
@@ -735,9 +735,9 @@ branch = "develop"
     has(&out.report, "companions disagree");
     has(&out.report, "pin sha absent");
     has(&out.report, "fix sha");
-    not_has(&out.script, "HEAD:'bad'");
-    not_has(&out.script, "HEAD:'missing'");
-    not_has(&out.script, "HEAD:'fixpin'");
+    not_has(&out.script, "refs/heads/bad'");
+    not_has(&out.script, "refs/heads/missing'");
+    not_has(&out.script, "refs/heads/fixpin'");
 }
 
 #[test]
@@ -1387,8 +1387,8 @@ paths = ["src/api.rs"]
         &[],
     );
     assert_eq!(quiet.code, 0, "{}", quiet.report);
-    has(&quiet.script, "HEAD:'core-ls1'");
-    not_has(&quiet.script, "HEAD:'desktop-wait'");
+    has(&quiet.script, "refs/heads/core-ls1'");
+    not_has(&quiet.script, "refs/heads/desktop-wait'");
 
     branch_new(&desk, "desktop-touch");
     checkout(&desk, "desktop-touch");
@@ -1421,7 +1421,7 @@ paths = ["src/api.rs"]
         &[],
     );
     assert_eq!(waiting.code, 0, "{}", waiting.report);
-    not_has(&waiting.script, "HEAD:'desktop-touch'");
+    not_has(&waiting.script, "refs/heads/desktop-touch'");
     fs::write(
         root.join("run.toml"),
         "[[done]]\nid = \"core\"\nlanded = true\n",
@@ -1454,7 +1454,7 @@ paths = ["src/api.rs"]
         &["--run", root.join("run.toml").to_str().unwrap()],
     );
     assert_eq!(go.code, 0, "{}", go.report);
-    has(&go.script, "HEAD:'desktop-touch'");
+    has(&go.script, "refs/heads/desktop-touch'");
 
     let root = tmp();
     let readcon = init(&root, "readcon");
@@ -1578,10 +1578,10 @@ needs = ["eon"]
     );
     assert_eq!(out.code, 0, "{}", out.report);
     not_has(&out.script, "vendor/metatensor-sys");
-    not_has(&out.script, "HEAD:'fix/amsel-gate-single-lid'");
+    not_has(&out.script, "refs/heads/fix/amsel-gate-single-lid'");
     has(&out.report, "unmarked patch: linkcell");
     has(&out.report, "edge: eon -> amsel-akmc needs");
-    not_has(&out.script, "HEAD:'keep'");
+    not_has(&out.script, "refs/heads/keep'");
 
     let root = tmp();
     let rgmin = init(&root, "rgmin");
@@ -1880,7 +1880,7 @@ branch = "bump"
     );
     assert_eq!(rerun.code, 0, "{}", rerun.report);
     not_has(&rerun.script, "git merge");
-    not_has(&rerun.script, "HEAD:'up'");
+    not_has(&rerun.script, "refs/heads/up'");
     let bump = rerun.script.find("cargo update").unwrap();
     if let Some(push) = rerun.script.find("git push") {
         assert!(bump < push, "{}", rerun.script);
@@ -1972,7 +1972,7 @@ branch = "land"
     );
     assert_eq!(pushed.code, 0, "{}", pushed.report);
     assert!(pushed.script_path.exists());
-    has(&pushed.script, "git push origin HEAD:'land'");
+    has(&pushed.script, "refs/heads/land'");
     let ran = Command::new("sh")
         .arg(&pushed.script_path)
         .status()
@@ -2442,7 +2442,7 @@ sync = "no-ff"
     ] {
         not_has(&open.script, bad);
     }
-    has(&open.script, "git push origin HEAD:'land'");
+    has(&open.script, "refs/heads/land'");
     has(&open.script, "git merge --no-ff 'develop'");
     let list = open.script.find("gh pr list").unwrap();
     let create = open.script.find("gh pr create").unwrap();
@@ -2673,7 +2673,7 @@ open_pr = false
         &[],
     );
     assert_eq!(out.code, 0, "{}", out.report);
-    has(&out.script, "git push origin HEAD:'land'");
+    has(&out.script, "refs/heads/land'");
     not_has(&out.script, "gh pr create");
     not_has(&out.script, "--force");
 }
@@ -2710,7 +2710,7 @@ tree = "{empty}"
     has(&out.report, "tree mismatch");
     has(&out.report, &actual);
     has(&out.report, empty);
-    not_has(&out.script, "HEAD:'land'");
+    not_has(&out.script, "refs/heads/land'");
 }
 
 fn m_bundle() {
@@ -2788,9 +2788,9 @@ branch = "land"
     has(&out.report, "ahead: 3");
     has(&out.report, "behind: 4");
     has(&out.report, "base pull request 345 is closed");
-    not_has(&out.script, "HEAD:'fix/wrappers'");
+    not_has(&out.script, "refs/heads/fix/wrappers'");
     not_has(&out.script, "gh pr close");
-    has(&out.script, "HEAD:'land'");
+    has(&out.script, "refs/heads/land'");
 }
 
 fn m_super() {
@@ -2824,8 +2824,8 @@ branch = "old"
     assert_eq!(out.code, 0, "{}", out.report);
     has(&out.report, "superseded-by: anneal-251");
     has(&out.report, "supersedes: anneal-248");
-    not_has(&out.script, "HEAD:'old'");
-    has(&out.script, "HEAD:'new'");
+    not_has(&out.script, "refs/heads/old'");
+    has(&out.script, "refs/heads/new'");
 }
 
 fn m_sibling() {
@@ -2992,7 +2992,7 @@ branch = "bump"
     );
     assert_eq!(out.code, 0, "{}", out.report);
     has(&out.report, &format!("fix sha {fix}"));
-    not_has(&out.script, "HEAD:'bump'");
+    not_has(&out.script, "refs/heads/bump'");
 }
 
 fn m_wrap() {
@@ -3399,7 +3399,7 @@ branch = "keep"
     );
     assert_eq!(out.code, 0, "{}", out.report);
     not_has(&out.script, "vendor/metatensor-sys");
-    has(&out.script, "HEAD:'keep'");
+    has(&out.script, "refs/heads/keep'");
 }
 
 fn m_land() {
@@ -3434,7 +3434,7 @@ needs = ["eon"]
     assert_eq!(out.code, 0, "{}", out.report);
     has(&out.report, "edge: eon -> amsel needs");
     not_has(&out.script, "fix/amsel-gate-single-lid");
-    not_has(&out.script, "HEAD:'bump'");
+    not_has(&out.script, "refs/heads/bump'");
 }
 
 fn m_trailers() {
@@ -3562,7 +3562,7 @@ branch = "bump"
         &["--run", root.join("run.toml").to_str().unwrap()],
     );
     assert_eq!(out.code, 0, "{}", out.report);
-    not_has(&out.script, "HEAD:'up'");
+    not_has(&out.script, "refs/heads/up'");
     has(&out.script, "cargo update -p 'upstream'");
     has(&out.script, &new);
 }
@@ -3723,4 +3723,45 @@ exit 0
         "create did not run when no pull request exists\n{}",
         out.script
     );
+}
+
+#[test]
+fn push_uses_the_verified_branch_object() {
+    let root = tmp();
+    let repo = init(&root, "box");
+    branch_new(&repo, "land");
+    git(&repo, &["commit", "--allow-empty", "-qm", "land"]);
+    let land = rev(&repo, "HEAD");
+    checkout(&repo, "develop");
+    git(&repo, &["commit", "--allow-empty", "-qm", "other"]);
+    let other = rev(&repo, "HEAD");
+    assert_ne!(land, other);
+    let bare = root.join("box.git");
+    bare_at(&repo, &bare);
+    let out = plan(
+        &root,
+        r#"
+[[node]]
+id = "box"
+repo = "box"
+path = "box"
+base = "develop"
+branch = "land"
+"#,
+        &[],
+    );
+    assert_eq!(out.code, 0, "{}", out.report);
+    has(
+        &out.script,
+        &format!("git push origin '{land}:refs/heads/land'"),
+    );
+    has(
+        &out.script,
+        &format!("test \"$(git rev-parse --verify 'refs/heads/land')\" = '{land}'"),
+    );
+    not_has(&out.script, "HEAD");
+    let ran = Command::new("sh").arg(&out.script_path).status().unwrap();
+    assert!(ran.success(), "{}", out.script);
+    assert_eq!(git(&bare, &["rev-parse", "land"]), land);
+    assert_ne!(git(&bare, &["rev-parse", "land"]), other);
 }
