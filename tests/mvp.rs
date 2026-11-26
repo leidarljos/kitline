@@ -301,3 +301,203 @@ open_pr = true
     not_has(&open.script, "gh pr merge");
 }
 
+#[test]
+fn step_02_stale_base_supersede() {
+    let root = tmp();
+    let eb = init(&root, "eb-local");
+    branch_new(&eb, "fix/dev-locked-rpath-wrappers");
+    grow(&eb, 3, "ahead");
+    checkout(&eb, "develop");
+    grow(&eb, 220, "behind");
+
+    let cp = init(&root, "cpmdc");
+    let tree = rev(&cp, "HEAD^{tree}");
+    let orphan = git(&cp, &["commit-tree", &tree, "-m", "orphan"]);
+    branch_new(&cp, "fix/mdi");
+
+    let stack = init(&root, "stack");
+    branch_new(&stack, "A");
+    git(&stack, &["commit", "--allow-empty", "-qm", "A"]);
+    branch_new(&stack, "B");
+    git(&stack, &["commit", "--allow-empty", "-qm", "B"]);
+    branch_new(&stack, "C");
+    git(&stack, &["commit", "--allow-empty", "-qm", "C"]);
+
+    let amsel = init(&root, "amsel");
+    write_file(
+        &amsel,
+        "amsel-core/Cargo.toml",
+        "[package]\nname = \"amsel-core\"\nversion = \"0.1.0\"\ntoken = \"base\"\n",
+    );
+    commit_all(&amsel, "base");
+    branch_new(&amsel, "tica");
+    write_file(
+        &amsel,
+        "amsel-core/Cargo.toml",
+        "[package]\nname = \"amsel-core\"\nversion = \"0.1.0\"\ntoken = \"tica\"\n",
+    );
+    commit_all(&amsel, "tica");
+    checkout(&amsel, "develop");
+    branch_new(&amsel, "feat-70");
+    write_file(
+        &amsel,
+        "amsel-core/Cargo.toml",
+        "[package]\nname = \"amsel-core\"\nversion = \"0.1.0\"\ntoken = \"pr70\"\n",
+    );
+    commit_all(&amsel, "pr70");
+    checkout(&amsel, "develop");
+    branch_new(&amsel, "old-66");
+    git(&amsel, &["commit", "--allow-empty", "-qm", "old"]);
+
+    let anneal = init(&root, "anneal");
+    branch_new(&anneal, "r251");
+    git(&anneal, &["commit", "--allow-empty", "-qm", "251"]);
+    checkout(&anneal, "develop");
+    branch_new(&anneal, "r248");
+    git(&anneal, &["commit", "--allow-empty", "-qm", "248"]);
+
+    let rgpot = init(&root, "rgpot");
+    branch_new(&rgpot, "open-505");
+    git(&rgpot, &["commit", "--allow-empty", "-qm", "505"]);
+    branch_new(&rgpot, "feat/md-session-nblib-r3");
+    git(&rgpot, &["commit", "--allow-empty", "-qm", "r3"]);
+
+    let ws = format!(
+        r#"
+ci = "cargo clippy --all-targets --all-features"
+
+[[node]]
+id = "eb-local-346"
+repo = "eb-local"
+path = "eb-local"
+base = "develop"
+branch = "fix/dev-locked-rpath-wrappers"
+pr = 346
+base_pr = 345
+base_pr_state = "closed"
+
+[[node]]
+id = "cpmdc-191"
+repo = "cpmdc"
+path = "cpmdc"
+base = "develop"
+branch = "fix/mdi"
+base_commit = "{orphan}"
+
+[[node]]
+id = "stack-a"
+repo = "stack"
+path = "stack"
+base = "develop"
+branch = "A"
+pr = 405
+pr_state = "open"
+
+[[node]]
+id = "stack-b"
+repo = "stack"
+path = "stack"
+base = "A"
+branch = "B"
+pr_state = "open"
+base_pr = 1
+base_pr_state = "closed"
+
+[[node]]
+id = "stack-c"
+repo = "stack"
+path = "stack"
+base = "B"
+branch = "C"
+
+[[node]]
+id = "amsel-70"
+repo = "amsel"
+path = "amsel"
+base = "develop"
+branch = "feat-70"
+pr = 70
+supersedes = "amsel-66"
+
+[[node]]
+id = "amsel-66"
+repo = "amsel"
+path = "amsel"
+base = "develop"
+branch = "old-66"
+pr = 66
+
+[[node]]
+id = "amsel-tica"
+repo = "amsel"
+path = "amsel"
+base = "develop"
+branch = "tica"
+
+[[node]]
+id = "anneal-251"
+repo = "anneal"
+path = "anneal"
+base = "develop"
+branch = "r251"
+pr = 251
+supersedes = "anneal-248"
+
+[[node]]
+id = "anneal-248"
+repo = "anneal"
+path = "anneal"
+base = "develop"
+branch = "r248"
+pr = 248
+
+[[node]]
+id = "rgpot-505"
+repo = "rgpot"
+path = "rgpot"
+base = "develop"
+branch = "open-505"
+pr = 505
+pr_state = "open"
+merge = "merge"
+
+[[node]]
+id = "rgpot-r3"
+repo = "rgpot"
+path = "rgpot"
+base = "open-505"
+branch = "feat/md-session-nblib-r3"
+"#
+    );
+    let out = plan(&root, &ws, &[]);
+    assert_eq!(out.code, 0, "{}", out.report);
+    has(&out.report, "ahead: 3");
+    has(&out.report, "behind: 220");
+    has(&out.report, "base pr state: closed");
+    has(&out.report, "not an ancestor");
+    has(&out.report, "edge: stack-a -> stack-b ancestry");
+    has(&out.report, "edge: stack-b -> stack-c ancestry");
+    not_has(&out.report, "edge: stack-a -> stack-c ancestry");
+    not_has(&out.report, "base pull request 1 is closed");
+    has(&out.report, "amsel-core/Cargo.toml");
+    has(&out.report, "superseded-by: amsel-70");
+    has(&out.report, "supersedes: amsel-66");
+    has(&out.report, "superseded-by: anneal-251");
+    has(&out.report, "supersedes: anneal-248");
+    has(&out.report, "merge: merge");
+    has(
+        &out.report,
+        "open-505 because stacked pull request rgpot-r3 still bases on it",
+    );
+    has(&out.report, "cargo clippy --all-targets --all-features");
+    has(&out.script, "HEAD:feat-70");
+    has(&out.script, "HEAD:tica");
+    not_has(&out.script, "fix/dev-locked-rpath-wrappers");
+    not_has(&out.script, "HEAD:old-66");
+    not_has(&out.script, "HEAD:r248");
+    not_has(&out.script, "gh pr close");
+    not_has(&out.script, "--delete");
+    not_has(&out.script, "branch -d");
+    not_has(&out.script, "branch -D");
+}
+
