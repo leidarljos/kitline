@@ -1,8 +1,9 @@
 #+title: kitline
 #+options: toc:nil num:nil ^:{}
 
-kitline reads one TOML workspace and writes an org report and a POSIX sh script.
-The script is the ready slice of a kit landing.
+kitline reads one TOML (Tom's Obvious Minimal Language) workspace.
+It writes an org report and a POSIX sh script.
+The script lists the commands for nodes that are ready to merge.
 kitline does not push, tag, publish, comment, or merge.
 =open_pr= is off unless a node sets it.
 
@@ -12,9 +13,12 @@ kitline does not push, tag, publish, comment, or merge.
 kitline --workspace workspace.toml --report plan.org --script plan.sh
 #+end_src
 
-Run kitline again after a node lands.
+Run kitline again after a node merges into its base.
 A missing bundle prerequisite exits 1.
-An ambiguous pin, a schema mismatch, two claims of one value, or a private edge dropped from a public report exits 2.
+An ambiguous pin exits 2.
+A schema mismatch exits 2.
+Two claims of one value exit 2.
+A dropped private edge exits 2.
 A cycle exits 3.
 
 * Example
@@ -30,8 +34,9 @@ kitline --workspace tests/fixtures/example/workspace.toml --report plan.org --sc
 * Workspace
 
 A node has an id, a repo path, a base, and a branch.
-A gate is a tag or a registry publish.
-Pins are read from =build.zig.zon=, Cargo manifests, and meson wrap files.
-A run file marks nodes that have already landed.
+A tag check sits ahead of a pin bump.
+A registry publish check sits ahead of a pin bump.
+Pins come from =build.zig.zon=, Cargo manifests, meson wrap files, and the Cargo metadata keys the workspace lists.
+A run file marks nodes that have already merged.
 =--tickets= is optional.
 =--online= is the only switch that may call =git ls-remote=.
