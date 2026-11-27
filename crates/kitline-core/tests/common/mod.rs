@@ -128,3 +128,35 @@ pub fn commit(repo: &Path, message: &str, author_date: &str, committer_date: &st
 pub fn head(repo: &Path) -> String {
     git(repo, &["rev-parse", "HEAD"], &[])
 }
+
+/// Re-exec this test binary so inherited `GIT_*` vars cannot race other tests.
+pub fn reexec(test: &str, env: &[(&str, &str)]) {
+    let exe = std::env::current_exe().unwrap();
+    let mut cmd = Command::new(exe);
+    cmd.args([
+        "--exact",
+        test,
+        "--ignored",
+        "--nocapture",
+        "--test-threads=1",
+    ]);
+    for (key, _) in std::env::vars_os() {
+        let Some(name) = key.to_str() else {
+            continue;
+        };
+        if name.starts_with("GIT_") {
+            cmd.env_remove(key);
+        }
+    }
+    for (key, value) in env {
+        cmd.env(key, value);
+    }
+    let out = cmd.output().unwrap();
+    if !out.status.success() {
+        panic!(
+            "reexec {test} failed\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+}

@@ -1,6 +1,5 @@
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::{Command, Stdio};
-use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::error::{Error, Result};
 
@@ -65,25 +64,16 @@ pub fn git_text(repo: Option<&Path>, args: &[&str]) -> Result<String> {
 }
 
 pub struct TempDir {
-    path: PathBuf,
+    inner: tempfile::TempDir,
 }
 
 impl TempDir {
     pub fn new() -> Result<Self> {
-        static N: AtomicU64 = AtomicU64::new(0);
-        let n = N.fetch_add(1, Ordering::Relaxed);
-        let path = std::env::temp_dir().join(format!("kitline-{}-{n}", std::process::id()));
-        std::fs::create_dir_all(&path).map_err(|e| Error::Git(e.to_string()))?;
-        Ok(Self { path })
+        let inner = tempfile::TempDir::new().map_err(|e| Error::Git(e.to_string()))?;
+        Ok(Self { inner })
     }
 
     pub fn path(&self) -> &Path {
-        &self.path
-    }
-}
-
-impl Drop for TempDir {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.path);
+        self.inner.path()
     }
 }

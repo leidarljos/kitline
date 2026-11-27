@@ -4,13 +4,14 @@ mod common;
 use std::path::Path;
 
 use kitline_core::{
-    mint, read, stamp, work_id, ChangeId, Error, LandedSha, ReviewHandle, ReviewedHead, SetId,
+    carry, mint, read, read_commit, stamp, work_id, ChangeId, Error, LandedSha, ReviewHandle,
+    ReviewedHead, SetId,
 };
 
 fn read_at(repo: &Path, spec: &str) -> ChangeId {
     let raw = common::git_out(repo, &["cat-file", "commit", spec]);
     let text = String::from_utf8(raw).unwrap();
-    read(&text).unwrap().unwrap()
+    read_commit(&text).unwrap().unwrap()
 }
 
 fn commit_at(repo: &Path, message: &str, when: &str) {
@@ -170,7 +171,7 @@ fn trailer_survives_rewrite_and_header_disagreement_is_refused() {
         "tree {tree}\nparent {parent}\nauthor Kit Tester <kit@example.com> 0 +0000\ncommitter Kit Tester <kit@example.com> 0 +0000\nchange-id {other}\n\n{msg}",
         msg = stamped.message
     );
-    match read(&raw) {
+    match read_commit(&raw) {
         Err(Error::Disagree { header, trailer }) => {
             assert_eq!(header, other.to_string());
             assert_eq!(trailer, id.to_string());
@@ -181,9 +182,166 @@ fn trailer_survives_rewrite_and_header_disagreement_is_refused() {
         "tree {tree}\nparent {parent}\nauthor Kit Tester <kit@example.com> 0 +0000\ncommitter Kit Tester <kit@example.com> 0 +0000\nchange-id {id}\n\n{msg}",
         msg = stamped.message
     );
-    assert_eq!(read(&agreed).unwrap(), Some(id));
+    assert_eq!(read_commit(&agreed).unwrap(), Some(id));
     let header_only = format!(
         "tree {tree}\nparent {parent}\nauthor Kit Tester <kit@example.com> 0 +0000\ncommitter Kit Tester <kit@example.com> 0 +0000\nchange-id {id}\n\nadd the change\n"
     );
-    assert_eq!(read(&header_only).unwrap(), Some(id));
+    assert_eq!(read_commit(&header_only).unwrap(), Some(id));
+
+    common::write(&repo.path, "follow.txt", "follow\n");
+    commit_at(&repo.path, "follow up fix\n", "2020-01-09T00:00:00+0000");
+    common::git(
+        &repo.path,
+        &["-c", "core.hooksPath=/dev/null", "rebase", "-i", "HEAD~2"],
+        &[
+            ("GIT_SEQUENCE_EDITOR", "sed -i -e 2s/^pick/squash/"),
+            ("GIT_EDITOR", "true"),
+            ("GIT_COMMITTER_DATE", "2020-01-10T00:00:00+0000"),
+        ],
+    );
+    assert_eq!(read_at(&repo.path, "HEAD"), id);
+
+    let old =
+        String::from_utf8(common::git_out(&repo.path, &["cat-file", "commit", "HEAD"])).unwrap();
+    common::git(
+        &repo.path,
+        &[
+            "-c",
+            "core.hooksPath=/dev/null",
+            "commit",
+            "--amend",
+            "-m",
+            "replaced subject",
+        ],
+        &[("GIT_COMMITTER_DATE", "2020-01-11T00:00:00+0000")],
+    );
+    let carried = carry(&old, "replaced subject").unwrap();
+    let msg = root.path().join("carried.txt");
+    std::fs::write(&msg, &carried).unwrap();
+    common::git(
+        &repo.path,
+        &[
+            "-c",
+            "core.hooksPath=/dev/null",
+            "commit",
+            "--amend",
+            "-F",
+            msg.to_str().unwrap(),
+        ],
+        &[("GIT_COMMITTER_DATE", "2020-01-12T00:00:00+0000")],
+    );
+    assert_eq!(read_at(&repo.path, "HEAD"), id);
+}
+
+#[test]
+fn stamp_keeps_minted_id_when_git_env_is_inherited() {
+    let root = common::Tmp::new();
+    let poison = root.path().join("poison");
+    std::fs::create_dir_all(&poison).unwrap();
+    common::git_here(&["init", "-q", "-b", "main", poison.to_str().unwrap()]);
+    let z = "z".repeat(32);
+    common::git(
+        &poison,
+        &[
+            "config",
+            "trailer.Kitline-Change.command",
+            &format!("printf %s {z}"),
+        ],
+        &[],
+    );
+    let git_dir = poison.join(".git");
+    common::reexec(
+        "stamp_reads_back_under_poisoned_git_env",
+        &[("GIT_DIR", git_dir.to_str().unwrap())],
+    );
+    common::reexec(
+        "stamp_reads_back_under_poisoned_git_env",
+        &[
+            ("GIT_CONFIG_COUNT", "1"),
+            ("GIT_CONFIG_KEY_0", "trailer.Kitline-Change.command"),
+            ("GIT_CONFIG_VALUE_0", &format!("printf %s {z}")),
+        ],
+    );
+}
+
+#[test]
+#[ignore]
+fn stamp_reads_back_under_poisoned_git_env() {
+    let id = mint();
+    let stamped = stamp("add the change\n", &id).unwrap();
+    assert_eq!(stamped.id, id);
+    assert_eq!(read(&stamped.message).unwrap(), Some(id));
+    assert!(!stamped.message.contains(&"z".repeat(32)));
+}
+
+#[test]
+fn stamp_keeps_divider_bytes_and_parse_lists_the_trailer() {
+    let id = mint();
+    let message = "subject\n\nReviewed-by: A <a@b.c>\n---\ndiff\n\n";
+    let stamped = stamp(message, &id).unwrap();
+    assert_eq!(stamped.id, id);
+    assert_eq!(read(&stamped.message).unwrap(), Some(id));
+    let line = format!("Kitline-Change: {id}\n");
+    assert_eq!(stamped.message.replacen(&line, "", 1), message);
+
+    let mut cmd = std::process::Command::new("git");
+    cmd.env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_SYSTEM", "/dev/null")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("LC_ALL", "C")
+        .args([
+            "--no-pager",
+            "-c",
+            "trailer.separators=:",
+            "interpret-trailers",
+            "--parse",
+        ])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    let mut child = cmd.spawn().unwrap();
+    std::io::Write::write_all(child.stdin.as_mut().unwrap(), stamped.message.as_bytes()).unwrap();
+    let out = child.wait_with_output().unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let parsed = String::from_utf8(out.stdout).unwrap();
+    assert!(parsed
+        .lines()
+        .any(|item| item == format!("Kitline-Change: {id}")));
+}
+
+#[test]
+fn stamp_without_final_lf_is_read_back_from_the_commit() {
+    let root = common::Tmp::new();
+    let repo = common::repo(root.path());
+    common::write(&repo.path, "f", "a\n");
+    common::commit(
+        &repo.path,
+        "base\n",
+        "2020-01-01T00:00:00+0000",
+        "2020-01-01T00:00:00+0000",
+    );
+
+    let id = mint();
+    let stamped = stamp("subject\n\nbody", &id).unwrap();
+    assert!(stamped.added);
+    assert_eq!(stamped.id, id);
+    assert_eq!(read(&stamped.message).unwrap(), Some(id));
+
+    let msg = root.path().join("MSG");
+    std::fs::write(&msg, &stamped.message).unwrap();
+    common::write(&repo.path, "f", "b\n");
+    common::git(&repo.path, &["add", "-A"], &[]);
+    common::git(
+        &repo.path,
+        &["commit", "-F", msg.to_str().unwrap()],
+        &[
+            ("GIT_AUTHOR_DATE", "2020-01-02T00:00:00+0000"),
+            ("GIT_COMMITTER_DATE", "2020-01-02T00:00:00+0000"),
+        ],
+    );
+    assert_eq!(read_at(&repo.path, "HEAD"), id);
 }

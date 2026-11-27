@@ -63,6 +63,7 @@ fn rev_of(repo: &Path, base: &str, tip: &str) -> Result<RevId> {
 /// exact message bytes, then the author ident `Name <email>`. Lengths are
 /// big-endian u32. The base commit is not included.
 fn feed_commit(hasher: &mut Sha256, repo: &Path, sha: &str) -> Result<()> {
+    refuse_merge_or_empty(repo, sha)?;
     let patch = patch_id(repo, sha)?;
     let raw = git(Some(repo), &["cat-file", "commit", sha])?;
     let (headers, message) = split_once(&raw, b"\n\n")
@@ -79,6 +80,39 @@ fn feed_bytes(hasher: &mut Sha256, bytes: &[u8]) -> Result<()> {
         u32::try_from(bytes.len()).map_err(|_| Error::Git("commit field is too long".into()))?;
     hasher.update(len.to_be_bytes());
     hasher.update(bytes);
+    Ok(())
+}
+
+/// Merges and empty commits have no single patch. Name them before
+/// `diff-tree`, which omits both without `-m` or `-c`.
+fn refuse_merge_or_empty(repo: &Path, sha: &str) -> Result<()> {
+    let line = git_text(Some(repo), &["rev-list", "--parents", "-n", "1", sha])?;
+    let mut ids = line.split_whitespace();
+    let commit = ids.next().unwrap_or(sha);
+    let parents: Vec<&str> = ids.collect();
+    if parents.len() > 1 {
+        return Err(Error::Merge(commit.to_string()));
+    }
+    let tree = git_text(
+        Some(repo),
+        &["rev-parse", "--verify", &format!("{commit}^{{tree}}")],
+    )?;
+    let prior = if let Some(parent) = parents.first() {
+        git_text(
+            Some(repo),
+            &["rev-parse", "--verify", &format!("{parent}^{{tree}}")],
+        )?
+    } else {
+        let raw = git_stdin(
+            Some(repo),
+            &["hash-object", "-t", "tree", "--stdin"],
+            Some(b""),
+        )?;
+        String::from_utf8_lossy(&raw).trim().to_string()
+    };
+    if tree == prior {
+        return Err(Error::Empty(commit.to_string()));
+    }
     Ok(())
 }
 

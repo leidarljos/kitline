@@ -12,6 +12,7 @@ claimdag = { git = "https://github.com/leidarljos/claimdag", rev = "8e0f98d846dd
 deedar = { git = "https://github.com/leidarljos/deedar", rev = "4fc453a799f9aff9e8f5ccd35f768e1efb07834a" }
 serde = { version = "1", features = ["derive"] }
 sha2 = "0.10"
+tempfile = "3.27.0"
 toml = "0.8"
 
 [dev-dependencies]

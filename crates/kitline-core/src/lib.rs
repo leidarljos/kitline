@@ -18,5 +18,5 @@ pub use error::{Error, Result};
 pub use forge::{LandedSha, ReviewHandle, ReviewedHead, SetId};
 pub use kit::{kit_make, kit_verify, Made};
 pub use rev::{identical, patch_equal, revision, tree_equal, Revision};
-pub use trailer::{mint, read, stamp, Stamped};
+pub use trailer::{carry, mint, read, read_commit, stamp, Stamped};
 pub use work::work_id;

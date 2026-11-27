@@ -72,10 +72,6 @@ impl RevId {
         out.copy_from_slice(&bytes);
         Ok(Self(out))
     }
-
-    pub fn as_str_hex(&self) -> String {
-        encode_hex(&self.0)
-    }
 }
 
 impl std::fmt::Display for RevId {

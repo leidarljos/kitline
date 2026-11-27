@@ -14,6 +14,10 @@ pub enum Error {
     },
     Kit(String),
     Deed(String),
+    /// A merge commit, named by its object id.
+    Merge(String),
+    /// A commit with no tree change, named by its object id.
+    Empty(String),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -29,6 +33,8 @@ impl fmt::Display for Error {
             }
             Self::Kit(s) => write!(f, "kit: {s}"),
             Self::Deed(s) => write!(f, "deed: {s}"),
+            Self::Merge(commit) => write!(f, "merge commit {commit}"),
+            Self::Empty(commit) => write!(f, "empty commit {commit}"),
         }
     }
 }

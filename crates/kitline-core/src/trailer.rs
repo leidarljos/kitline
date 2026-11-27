@@ -23,59 +23,135 @@ pub fn mint() -> ChangeId {
     ChangeId::from_bytes(bytes)
 }
 
-/// Read a `Kitline-Change` trailer, and a jj `change-id` header when `text`
-/// is a raw commit. Header and trailer must name the same change.
+/// Read a `Kitline-Change` trailer from a commit message.
 pub fn read(text: &str) -> Result<Option<ChangeId>> {
-    if let Some((headers, message)) = as_commit(text) {
-        let header = header_change_id(headers)?;
-        let trailer = message_change_id(message)?;
-        return match (header, trailer) {
-            (Some(header), Some(trailer)) if header != trailer => Err(Error::Disagree {
-                header: header.to_string(),
-                trailer: trailer.to_string(),
-            }),
-            (Some(header), _) => Ok(Some(header)),
-            (None, trailer) => Ok(trailer),
-        };
-    }
     message_change_id(text)
+}
+
+/// Read a raw commit object. A jj `change-id` header and a `Kitline-Change`
+/// trailer must name the same change. Prose is not sniffed here.
+pub fn read_commit(object: &str) -> Result<Option<ChangeId>> {
+    let Some((headers, message)) = as_commit(object) else {
+        return Err(Error::Trailer("not a raw commit object".into()));
+    };
+    let header = header_change_id(headers)?;
+    let trailer = message_change_id(message)?;
+    match (header, trailer) {
+        (Some(header), Some(trailer)) if header != trailer => Err(Error::Disagree {
+            header: header.to_string(),
+            trailer: trailer.to_string(),
+        }),
+        (Some(header), _) => Ok(Some(header)),
+        (None, trailer) => Ok(trailer),
+    }
 }
 
 /// Append `Kitline-Change` when the message has none. An existing trailer
 /// is left byte for byte, and its id is the one returned.
+///
+/// Placement is `git interpret-trailers`: beside the trailer block, before
+/// a `---` divider. Bytes outside the inserted line stay as they were.
+/// A message with no final LF gets the blank line the divider path inserts.
+/// A message that already ends in LF is not rewritten first.
+///
+/// The id returned is the one read back from the message git wrote.
 pub fn stamp(message: &str, id: &ChangeId) -> Result<Stamped> {
-    let parsed = trailer_lines(message)?;
-    if let Some(existing) = kitline_ids(&parsed)? {
+    if let Some(existing) = message_change_id(message)? {
         return Ok(Stamped {
             id: existing,
             message: message.to_string(),
             added: false,
         });
     }
-    let mut out = message.to_string();
-    if parsed.is_empty() {
-        if !out.ends_with('\n') {
-            out.push('\n');
-        }
-        if !out.ends_with("\n\n") {
-            out.push('\n');
-        }
+    let trailer = format!("Kitline-Change: {id}");
+    let padded;
+    let input = if message.ends_with('\n') || has_divider(message) {
+        message
     } else {
-        if !out.ends_with('\n') {
-            out.push('\n');
-        }
-        while out.ends_with("\n\n") {
-            out.pop();
-        }
+        padded = format!("{message}\n");
+        padded.as_str()
+    };
+    let out = git_stdin(
+        None,
+        &[
+            "-c",
+            "trailer.separators=:",
+            "interpret-trailers",
+            "--trailer",
+            &trailer,
+        ],
+        Some(input.as_bytes()),
+    )?;
+    let message = String::from_utf8(out)
+        .map_err(|_| Error::Trailer("stamped message is not utf-8".into()))?;
+    let written = message_change_id(&message)?;
+    match written {
+        Some(got) if got == *id => Ok(Stamped {
+            id: got,
+            message,
+            added: true,
+        }),
+        Some(got) => Err(Error::Disagree {
+            header: id.to_string(),
+            trailer: got.to_string(),
+        }),
+        None => Err(Error::Trailer(
+            "stamped message has no Kitline-Change".into(),
+        )),
     }
-    out.push_str("Kitline-Change: ");
-    out.push_str(&id.to_string());
-    out.push('\n');
-    Ok(Stamped {
-        id: *id,
-        message: out,
-        added: true,
-    })
+}
+
+/// Restamp `message` with the ChangeId of the commit it replaces.
+///
+/// `previous` is a raw commit or a message. No id in `message`: stamp the
+/// previous id. The same id: return `message` unchanged. A different id
+/// is refused. `git commit --amend -m` throws the old message away, so the
+/// caller passes that commit in here.
+pub fn carry(previous: &str, message: &str) -> Result<String> {
+    let old = if as_commit(previous).is_some() {
+        read_commit(previous)?
+    } else {
+        read(previous)?
+    };
+    let Some(old) = old else {
+        return Err(Error::Trailer(
+            "commit being replaced has no Kitline-Change".into(),
+        ));
+    };
+    match message_change_id(message)? {
+        None => {
+            let stamped = stamp(message, &old)?;
+            if stamped.id != old {
+                return Err(Error::Disagree {
+                    header: old.to_string(),
+                    trailer: stamped.id.to_string(),
+                });
+            }
+            Ok(stamped.message)
+        }
+        Some(found) if found == old => Ok(message.to_string()),
+        Some(found) => Err(Error::Disagree {
+            header: old.to_string(),
+            trailer: found.to_string(),
+        }),
+    }
+}
+
+/// A newline-terminated `---` line. Git treats the following byte as the
+/// divider only when it is whitespace, which includes the line's own LF.
+/// A final `---` with no LF is not a divider, so the caller adds the LF.
+fn has_divider(message: &str) -> bool {
+    let Some((head, _)) = message.rsplit_once('\n') else {
+        return false;
+    };
+    head.lines().any(is_divider_line)
+}
+
+fn is_divider_line(line: &str) -> bool {
+    let Some(rest) = line.strip_prefix("---") else {
+        return false;
+    };
+    rest.is_empty() || rest.as_bytes()[0].is_ascii_whitespace()
 }
 
 fn message_change_id(message: &str) -> Result<Option<ChangeId>> {
@@ -126,9 +202,8 @@ fn ids_ending_earlier_paragraphs(message: &str) -> Result<Option<ChangeId>> {
         if !key.eq_ignore_ascii_case("Kitline-Change") {
             continue;
         }
-        let id = ChangeId::parse(value).map_err(|_| {
-            Error::Trailer(format!("Kitline-Change is not a change id: {value}"))
-        })?;
+        let id = ChangeId::parse(value)
+            .map_err(|_| Error::Trailer(format!("Kitline-Change is not a change id: {value}")))?;
         if let Some(prev) = found {
             if prev != id {
                 return Err(Error::Disagree {

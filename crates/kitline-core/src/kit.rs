@@ -1,13 +1,14 @@
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
-use deedar::{Body, Client, CreateRequest, DeedId, Grant, Kind};
+use deedar::{is_write_once_addr, Body, Client, CreateRequest, DeedId, Kind};
 use serde::{Deserialize, Serialize};
 
 use crate::change::{encode_hex, ObjectId, RevId};
 use crate::error::{Error, Result};
 use crate::gitcmd::{git, git_text, TempDir};
 use crate::rev::{resolve, revision, Revision};
+use crate::trailer::read_commit;
 
 const FILES: [&str; 5] = [
     "MSG.txt",
@@ -48,18 +49,16 @@ pub fn kit_make(
     if listed.iter().all(u8::is_ascii_whitespace) {
         return Err(Error::Kit("empty series".into()));
     }
+    require_change_ids(&repo, base.as_str(), tip.as_str())?;
     let deed_id = DeedId::parse(&format!("deed-set-kit-{}-{}", revision.rev, base.as_str()))
         .map_err(|e| Error::Deed(e.to_string()))?;
 
     std::fs::create_dir_all(out_dir).map_err(|e| Error::Kit(e.to_string()))?;
     let out_dir = abs(out_dir)?;
     let bundle = out_dir.join("kit.bundle");
-    if bundle.exists() {
-        std::fs::remove_file(&bundle).map_err(|e| Error::Kit(e.to_string()))?;
-    }
     write_bundle(&repo, &base, &tip, &bundle)?;
     let mbox = format_series(&repo, base.as_str(), tip.as_str())?;
-    std::fs::write(out_dir.join("series.mbox"), &mbox).map_err(|e| Error::Kit(e.to_string()))?;
+    write_bytes(&out_dir.join("series.mbox"), &mbox)?;
     let manifest = Manifest {
         version: 1,
         base: base.as_str().to_string(),
@@ -73,15 +72,14 @@ pub fn kit_make(
     } else {
         format!("{manifest_text}\n")
     };
-    std::fs::write(out_dir.join("manifest.toml"), &manifest_text)
-        .map_err(|e| Error::Kit(e.to_string()))?;
+    write_bytes(&out_dir.join("manifest.toml"), manifest_text.as_bytes())?;
     let msg = format!(
         "Kitline kit\nbase {}\ntip {}\nrev {}\n",
         base.as_str(),
         tip.as_str(),
         revision.rev
     );
-    std::fs::write(out_dir.join("MSG.txt"), msg).map_err(|e| Error::Kit(e.to_string()))?;
+    write_bytes(&out_dir.join("MSG.txt"), msg.as_bytes())?;
     write_sums(&out_dir)?;
 
     let mut members = Vec::new();
@@ -99,7 +97,10 @@ pub fn kit_make(
             sources: Vec::new(),
             agent_id: "kitline".into(),
             activity_id: None,
-            grants: vec![Grant::Path(out_dir.clone())],
+            // Grant::Path is stored on the deed and compared field for field.
+            // The output directory is not the kit identity (rev + base), so
+            // a second directory must not freeze an equal series.
+            grants: Vec::new(),
             body: Body::Set {
                 title: format!("kit {}", revision.rev),
                 members,
@@ -150,23 +151,23 @@ pub fn kit_verify(repo: &Path, kit_dir: &Path, store: &Path) -> Result<Revision>
     };
     let mut from_deed = BTreeSet::new();
     for member in members {
-        let text = member.to_string_lossy();
-        let Some(hex) = text.strip_prefix("sha256:") else {
+        let Some(hex) = member
+            .to_str()
+            .filter(|text| is_write_once_addr(text))
+            .and_then(|text| text.strip_prefix("sha256:"))
+        else {
             return Err(Error::Kit(format!(
                 "member {} is not a content address",
                 member.display()
             )));
         };
-        if hex.len() != 64 || !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
-            return Err(Error::Kit(format!("member address {hex} is not sha256")));
-        }
         let stored = std::fs::read(store.join("bytes").join(hex))
             .map_err(|e| Error::Kit(format!("bytes/{hex}: {e}")))?;
         let got = sha256_hex(&stored);
         if got != hex {
             return Err(Error::Kit(format!("bytes/{hex} hashes to {got}")));
         }
-        from_deed.insert(hex.to_ascii_lowercase());
+        from_deed.insert(hex.to_string());
     }
     let mut from_files = BTreeSet::new();
     for name in FILES {
@@ -241,8 +242,8 @@ pub fn kit_verify(repo: &Path, kit_dir: &Path, store: &Path) -> Result<Revision>
 }
 
 fn write_bundle(repo: &Path, base: &ObjectId, tip: &ObjectId, dest: &Path) -> Result<()> {
-    let tmp = TempDir::new()?;
-    let clone = tmp.path().join("repo");
+    let scratch = TempDir::new()?;
+    let clone = scratch.path().join("repo");
     git(
         None,
         &[
@@ -260,15 +261,25 @@ fn write_bundle(repo: &Path, base: &ObjectId, tip: &ObjectId, dest: &Path) -> Re
         Some(&clone),
         &["update-ref", "refs/heads/kit-tip", tip.as_str()],
     )?;
-    let dest_arg = dest
+    refuse_symlink(dest)?;
+    let tmp = scratch_name(dest)?;
+    let tmp_arg = tmp
         .to_str()
         .ok_or_else(|| Error::Kit("bundle path is not utf-8".into()))?;
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&tmp)
+        .map_err(|e| Error::Kit(format!("{}: {e}", tmp.display())))?;
     let exclude = format!("^{}", base.as_str());
-    git(
+    if let Err(e) = git(
         Some(&clone),
-        &["bundle", "create", dest_arg, "refs/heads/kit-tip", &exclude],
-    )?;
-    Ok(())
+        &["bundle", "create", tmp_arg, "refs/heads/kit-tip", &exclude],
+    ) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
+    }
+    publish(&tmp, dest)
 }
 
 fn format_series(repo: &Path, base: &str, tip: &str) -> Result<Vec<u8>> {
@@ -390,7 +401,7 @@ fn write_sums(dir: &Path) -> Result<()> {
         text.push_str(name);
         text.push('\n');
     }
-    std::fs::write(dir.join("SHA256SUMS"), text).map_err(|e| Error::Kit(e.to_string()))
+    write_bytes(&dir.join("SHA256SUMS"), text.as_bytes())
 }
 
 fn check_sums(dir: &Path) -> Result<()> {
@@ -407,7 +418,7 @@ fn check_sums(dir: &Path) -> Result<()> {
         if name == "SHA256SUMS" {
             return Err(Error::Kit("SHA256SUMS lists itself".into()));
         }
-        let got = file_sha(&dir.join(name))?;
+        let got = file_sha(&kit_child(dir, name)?)?;
         if got != hex {
             return Err(Error::Kit(format!("{name} checksum mismatch")));
         }
@@ -417,6 +428,78 @@ fn check_sums(dir: &Path) -> Result<()> {
         return Err(Error::Kit(format!("SHA256SUMS has {n} entries")));
     }
     Ok(())
+}
+
+/// A new file in `path`'s directory, then rename onto `path`.
+/// A pre-existing symlink is refused. A hard link is replaced by name,
+/// so the other link keeps its bytes.
+fn write_bytes(path: &Path, bytes: &[u8]) -> Result<()> {
+    refuse_symlink(path)?;
+    let tmp = scratch_name(path)?;
+    {
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&tmp)
+            .map_err(|e| Error::Kit(format!("{}: {e}", tmp.display())))?;
+        std::io::Write::write_all(&mut file, bytes)
+            .map_err(|e| Error::Kit(format!("{}: {e}", tmp.display())))?;
+    }
+    publish(&tmp, path)
+}
+
+fn publish(tmp: &Path, dest: &Path) -> Result<()> {
+    if let Err(e) = std::fs::rename(tmp, dest) {
+        let _ = std::fs::remove_file(tmp);
+        return Err(Error::Kit(format!("{}: {e}", dest.display())));
+    }
+    Ok(())
+}
+
+fn refuse_symlink(path: &Path) -> Result<()> {
+    match std::fs::symlink_metadata(path) {
+        Ok(meta) if meta.file_type().is_symlink() => {
+            Err(Error::Kit(format!("{} is a symlink", path.display())))
+        }
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(Error::Kit(e.to_string())),
+        _ => Ok(()),
+    }
+}
+
+fn scratch_name(path: &Path) -> Result<PathBuf> {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static N: AtomicU64 = AtomicU64::new(0);
+    let name = path
+        .file_name()
+        .ok_or_else(|| Error::Kit(format!("{} has no file name", path.display())))?;
+    let n = N.fetch_add(1, Ordering::Relaxed);
+    let mut tmp = std::ffi::OsString::from(".");
+    tmp.push(name);
+    tmp.push(format!(".{}.{n}.tmp", std::process::id()));
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    Ok(parent.join(tmp))
+}
+
+/// Names from SHA256SUMS stay inside `dir`. `/`, `..`, and absolute paths
+/// are refused before any open.
+fn kit_child(dir: &Path, name: &str) -> Result<PathBuf> {
+    let path = Path::new(name);
+    let inside = !name.is_empty()
+        && !name.contains('/')
+        && !name.contains('\\')
+        && !path.is_absolute()
+        && path
+            .components()
+            .all(|component| matches!(component, std::path::Component::Normal(_)));
+    if !inside {
+        return Err(Error::Kit(format!(
+            "SHA256SUMS name is outside the kit: {name}"
+        )));
+    }
+    Ok(dir.join(name))
 }
 
 fn file_sha(path: &Path) -> Result<String> {
@@ -429,6 +512,34 @@ fn sha256_hex(bytes: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(bytes);
     encode_hex(&hasher.finalize())
+}
+
+/// A series commit with no ChangeId is refused. Never mint one here.
+fn require_change_ids(repo: &Path, base: &str, tip: &str) -> Result<()> {
+    let listed = git_text(
+        Some(repo),
+        &["rev-list", "--reverse", &format!("{base}..{tip}")],
+    )?;
+    if listed.is_empty() {
+        return Ok(());
+    }
+    for sha in listed.split_whitespace() {
+        let raw = git(Some(repo), &["cat-file", "commit", sha])?;
+        let text =
+            String::from_utf8(raw).map_err(|_| Error::Kit(format!("commit {sha} is not utf-8")))?;
+        if read_commit(&text)?.is_some() {
+            continue;
+        }
+        let subject = text
+            .split_once("\n\n")
+            .and_then(|(_, msg)| msg.lines().next())
+            .unwrap_or("");
+        let subject = subject.trim_end_matches('\r');
+        return Err(Error::Kit(format!(
+            "commit {sha} ({subject}) has no ChangeId"
+        )));
+    }
+    Ok(())
 }
 
 fn split_range(range: &str) -> Result<(&str, &str)> {
