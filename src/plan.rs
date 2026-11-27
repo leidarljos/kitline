@@ -494,10 +494,10 @@ fn inspect(node: &crate::model::Node, ws: &Workspace, ws_dir: &Path) -> Result<L
     } else {
         (0, 0, false)
     };
-    let (mt_clean, mt_files) =
+    let (mt_clean, _tree, mt_files) =
         if kind == "gate" || head_sha.is_empty() || target_sha.is_empty() || head_sha == target_sha
         {
-            (true, Vec::new())
+            (true, String::new(), Vec::new())
         } else {
             gitutil::merge_tree(&dir, &target_sha, &head_sha)
         };
@@ -1678,7 +1678,7 @@ fn sibling_notes(lives: &[Live], notes: &mut Vec<String>) {
             {
                 continue;
             }
-            let (clean, files) = gitutil::merge_tree(&a.dir, &a.head_sha, &b.head_sha);
+            let (clean, _tree, files) = gitutil::merge_tree(&a.dir, &a.head_sha, &b.head_sha);
             if !clean {
                 notes.push(format!(
                     "sibling: {} {} file: {}",

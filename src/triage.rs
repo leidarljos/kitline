@@ -2,9 +2,12 @@
 //!
 //! Phase 1 inventories every head. Phase 2 grades what is already
 //! upstream with patch-id, cherry and merge-base. Phase 6 records
-//! freshness. The plan lists KEEP, DROP, REBASE and the remaining heads.
-//! `triage verify` re-runs each DROP check against the live branch.
+//! freshness. The plan lists KEEP, DROP, REBASE, the remaining heads, and
+//! an unrelated head as UNSORTED. Rows use `refs/heads/...`. Git commands
+//! take the commit sha. `triage verify` re-reads that ref and re-runs each
+//! DROP check.
 
+use crate::gitutil;
 use clap::Parser;
 use sha2::{Digest, Sha256};
 use std::fs;
@@ -97,6 +100,7 @@ enum Bucket {
     Drop,
     Rebase,
     Rest,
+    Unsorted,
 }
 
 impl Bucket {
@@ -106,6 +110,7 @@ impl Bucket {
             Self::Drop => "DROP",
             Self::Rebase => "REBASE",
             Self::Rest => "REST",
+            Self::Unsorted => "UNSORTED",
         }
     }
 
@@ -115,6 +120,7 @@ impl Bucket {
             Self::Drop => "drop",
             Self::Rebase => "rebase",
             Self::Rest => "rest",
+            Self::Unsorted => "unsorted",
         }
     }
 }
@@ -127,6 +133,7 @@ struct Row {
     behind: u64,
     author_old: String,
     author_new: String,
+    author_new_epoch: i64,
     grade: String,
     bucket: Bucket,
     check: String,
@@ -178,21 +185,23 @@ fn plan(cli: &TriageCli) -> Result<(), String> {
     let scratch = scratch_dir()?;
     let bare = scratch.path.join("bare.git");
     clone_bare(&repo, &bare)?;
+    let trunk_ref = format!("refs/heads/{}", cli.trunk);
     let trunk_sha = git_ok(
         &bare,
-        &[
-            "rev-parse",
-            "--verify",
-            &format!("refs/heads/{}", cli.trunk),
-        ],
+        &["rev-parse", "--verify", "--end-of-options", &trunk_ref],
     )
     .map_err(|_| format!("trunk {} is not a head", cli.trunk))?;
     let trunk_tree = git_ok(
         &bare,
-        &["rev-parse", "--verify", &format!("{trunk_sha}^{{tree}}")],
+        &[
+            "rev-parse",
+            "--verify",
+            "--end-of-options",
+            &format!("{trunk_sha}^{{tree}}"),
+        ],
     )?;
     let heads = selected_heads(&bare, &cli.trunk, &cli.include, &cli.exclude)?;
-    if !heads.iter().any(|h| h.name == cli.trunk) {
+    if !heads.iter().any(|h| short_of(&h.name) == cli.trunk) {
         return Err(format!("trunk {} is not a head", cli.trunk));
     }
     let snap = snapshot(&heads);
@@ -204,12 +213,19 @@ fn plan(cli: &TriageCli) -> Result<(), String> {
     };
     let mut rows = Vec::with_capacity(heads.len());
     for head in &heads {
-        let kept = head.name == cli.trunk || cli.keep.iter().any(|pat| glob_match(pat, &head.name));
+        let short = short_of(&head.name);
+        let kept = short == cli.trunk || cli.keep.iter().any(|pat| glob_match(pat, short));
         rows.push(classify(&ctx, head, kept)?);
     }
     let text = render(&repo, &cli.trunk, &trunk_sha, &snap, &rows)?;
     write_text(&cli.out, &text)?;
-    for bucket in [Bucket::Keep, Bucket::Drop, Bucket::Rebase, Bucket::Rest] {
+    for bucket in [
+        Bucket::Keep,
+        Bucket::Drop,
+        Bucket::Rebase,
+        Bucket::Rest,
+        Bucket::Unsorted,
+    ] {
         let n = rows.iter().filter(|r| r.bucket == bucket).count();
         println!("{} {n}", bucket.key());
     }
@@ -223,14 +239,20 @@ fn verify(path: &Path) -> Result<(), String> {
     let scratch = scratch_dir()?;
     let bare = scratch.path.join("bare.git");
     clone_bare(&repo, &bare)?;
+    let trunk_ref = format!("refs/heads/{trunk}");
     let trunk_sha = git_ok(
         &bare,
-        &["rev-parse", "--verify", &format!("refs/heads/{trunk}")],
+        &["rev-parse", "--verify", "--end-of-options", &trunk_ref],
     )
     .map_err(|_| format!("trunk {trunk} is not a head"))?;
     let trunk_tree = git_ok(
         &bare,
-        &["rev-parse", "--verify", &format!("{trunk_sha}^{{tree}}")],
+        &[
+            "rev-parse",
+            "--verify",
+            "--end-of-options",
+            &format!("{trunk_sha}^{{tree}}"),
+        ],
     )?;
     let ctx = Ctx {
         repo: &bare,
@@ -244,13 +266,15 @@ fn verify(path: &Path) -> Result<(), String> {
             failed.push(format!("drop does not hold: {}", row.branch));
             continue;
         }
-        if !branch_exists(&bare, &row.branch)? {
+        let full = head_ref(&row.branch);
+        if !branch_exists(&bare, &full)? {
             failed.push(format!("drop does not hold: {}", row.branch));
             continue;
         }
-        // Resolve the live branch tip. The sha recorded in the plan is the
-        // evidence from plan time; a later commit has to fail this check.
-        let holds = check_holds(&ctx, &row.branch, &row.check)?;
+        // Re-read the live tip of the full ref. The sha in the plan is only
+        // the evidence from plan time.
+        let live = live_sha(&bare, &full)?;
+        let holds = check_holds(&ctx, &live, &row.check)?;
         if !holds {
             failed.push(format!("drop does not hold: {}", row.branch));
         }
@@ -262,19 +286,21 @@ fn verify(path: &Path) -> Result<(), String> {
     }
 }
 
-fn check_holds(ctx: &Ctx<'_>, branch: &str, check: &str) -> Result<bool, String> {
-    let merge = merge_outcome(ctx.repo, ctx.trunk, branch)?;
+fn check_holds(ctx: &Ctx<'_>, sha: &str, check: &str) -> Result<bool, String> {
+    let merge = merge_outcome(ctx.repo, ctx.trunk_sha, sha)?;
     let noop = merge.clean && merge.tree == ctx.trunk_tree;
     match check {
-        "ancestor" => is_ancestor(ctx.repo, branch, ctx.trunk),
+        "ancestor" => Ok(gitutil::is_ancestor(ctx.repo, sha, ctx.trunk_sha)),
         "patch-equal" => {
-            let cherries = cherry(ctx.repo, ctx.trunk, branch)?;
+            let cherries = cherry(ctx.repo, ctx.trunk_sha, sha)?;
             let all = !cherries.is_empty() && cherries.iter().all(|c| c.upstream);
             Ok(all && noop)
         }
         "squash-equal" => {
-            let base = git_ok(ctx.repo, &["merge-base", ctx.trunk, branch])?;
-            let hit = squash_hit(ctx.repo, &base, ctx.trunk, branch)?;
+            let Some(base) = merge_base(ctx.repo, ctx.trunk_sha, sha)? else {
+                return Ok(false);
+            };
+            let hit = squash_hit(ctx.repo, &base, ctx.trunk_sha, sha)?;
             Ok(hit.is_some() && noop)
         }
         "no-op" => Ok(noop),
@@ -283,16 +309,35 @@ fn check_holds(ctx: &Ctx<'_>, branch: &str, check: &str) -> Result<bool, String>
 }
 
 fn classify(ctx: &Ctx<'_>, head: &Head, kept: bool) -> Result<Row, String> {
-    if !name_ok(&head.name) {
-        return Err(format!(
-            "branch name {} cannot be stored in the plan",
-            head.name
-        ));
+    let short = short_of(&head.name);
+    if !name_ok(short) {
+        return Err(format!("branch name {short} cannot be stored in the plan"));
     }
-    let base = git_ok(ctx.repo, &["merge-base", ctx.trunk, &head.name])?;
-    let (behind, ahead) = ahead_behind(ctx.repo, ctx.trunk, &head.name)?;
-    let (author_old, author_new) = author_range(ctx.repo, ctx.trunk, &head.name)?;
-    let merge = merge_outcome(ctx.repo, ctx.trunk, &head.name)?;
+    let (ahead, behind) = gitutil::ahead_behind(ctx.repo, ctx.trunk_sha, &head.sha)
+        .ok_or_else(|| format!("ahead/behind for {}", head.name))?;
+    let (author_old, author_new, author_new_epoch) =
+        author_range(ctx.repo, ctx.trunk_sha, &head.sha)?;
+    let Some(base) = merge_base(ctx.repo, ctx.trunk_sha, &head.sha)? else {
+        return Ok(Row {
+            branch: head.name.clone(),
+            sha: head.sha.clone(),
+            base: String::new(),
+            ahead,
+            behind,
+            author_old,
+            author_new,
+            author_new_epoch,
+            grade: "unrelated".to_string(),
+            bucket: Bucket::Unsorted,
+            check: String::new(),
+            evidence: String::new(),
+            applies: "no".to_string(),
+            conflicts: String::new(),
+            dropped: String::new(),
+            reason: "unrelated".to_string(),
+        });
+    };
+    let merge = merge_outcome(ctx.repo, ctx.trunk_sha, &head.sha)?;
     let applies = if merge.clean { "yes" } else { "no" };
     let conflicts = join_list(&merge.conflicts);
     let noop = merge.clean && merge.tree == ctx.trunk_tree;
@@ -306,6 +351,7 @@ fn classify(ctx: &Ctx<'_>, head: &Head, kept: bool) -> Result<Row, String> {
         behind,
         author_old,
         author_new,
+        author_new_epoch,
         grade: decided.grade,
         bucket: decided.bucket,
         check: decided.check,
@@ -357,21 +403,21 @@ fn decide(
     noop: bool,
 ) -> Result<Decision, String> {
     if kept {
-        let reason = if head.name == ctx.trunk {
+        let reason = if short_of(&head.name) == ctx.trunk {
             "trunk"
         } else {
             "keep"
         };
         return Ok(plain("keep", Bucket::Keep, reason));
     }
-    if is_ancestor(ctx.repo, &head.name, ctx.trunk)? {
+    if gitutil::is_ancestor(ctx.repo, &head.sha, ctx.trunk_sha) {
         return Ok(drop_of(
             "ancestor",
             format!("is-ancestor {} {}", head.sha, ctx.trunk_sha),
             "ancestor of trunk",
         ));
     }
-    let cherries = cherry(ctx.repo, ctx.trunk, &head.name)?;
+    let cherries = cherry(ctx.repo, ctx.trunk_sha, &head.sha)?;
     let all_up = !cherries.is_empty() && cherries.iter().all(|c| c.upstream);
     let some_up = cherries.iter().any(|c| c.upstream);
     let some_new = cherries.iter().any(|c| !c.upstream);
@@ -393,7 +439,7 @@ fn decide(
             "merged then reverted or modified upstream",
         ));
     }
-    if let Some((pid, commit)) = squash_hit(ctx.repo, base, ctx.trunk, &head.name)? {
+    if let Some((pid, commit)) = squash_hit(ctx.repo, base, ctx.trunk_sha, &head.sha)? {
         if noop {
             return Ok(drop_of(
                 "squash-equal",
@@ -466,12 +512,24 @@ fn render(
     buf.push_str(&format!("#+trunk_sha: {trunk_sha}\n"));
     buf.push_str(&format!("#+snapshot: {snap}\n"));
     buf.push_str(&format!("#+version: {}\n", env!("CARGO_PKG_VERSION")));
-    for bucket in [Bucket::Keep, Bucket::Drop, Bucket::Rebase, Bucket::Rest] {
+    for bucket in [
+        Bucket::Keep,
+        Bucket::Drop,
+        Bucket::Rebase,
+        Bucket::Rest,
+        Bucket::Unsorted,
+    ] {
         let n = rows.iter().filter(|r| r.bucket == bucket).count();
         buf.push_str(&format!("#+{}: {n}\n", bucket.key()));
     }
     buf.push('\n');
-    for bucket in [Bucket::Keep, Bucket::Drop, Bucket::Rebase, Bucket::Rest] {
+    for bucket in [
+        Bucket::Keep,
+        Bucket::Drop,
+        Bucket::Rebase,
+        Bucket::Rest,
+        Bucket::Unsorted,
+    ] {
         emit_bucket(&mut buf, rows, bucket);
     }
     Ok(buf)
@@ -480,8 +538,8 @@ fn render(
 fn emit_bucket(buf: &mut String, rows: &[Row], bucket: Bucket) {
     let mut mine: Vec<&Row> = rows.iter().filter(|r| r.bucket == bucket).collect();
     mine.sort_by(|a, b| {
-        b.author_new
-            .cmp(&a.author_new)
+        b.author_new_epoch
+            .cmp(&a.author_new_epoch)
             .then_with(|| a.branch.cmp(&b.branch))
     });
     buf.push_str(&format!("* {}\n", bucket.title()));
@@ -627,26 +685,34 @@ fn selected_heads(
     include: &[String],
     exclude: &[String],
 ) -> Result<Vec<Head>, String> {
-    let text = git_ok(
+    let out = gitutil::git(
         repo,
         &[
             "for-each-ref",
-            "--format=%(refname) %(objectname)",
+            "--format=%(objectname)%00%(refname)",
+            "--end-of-options",
             "refs/heads",
         ],
-    )?;
+    );
+    if out.status != 0 {
+        return Err(format!("for-each-ref: {}", out.stderr.trim()));
+    }
     let mut heads = Vec::new();
-    for line in text.lines() {
-        let mut parts = line.split_whitespace();
-        let Some(name) = parts.next() else { continue };
-        let Some(sha) = parts.next() else { continue };
-        let Some(name) = name.strip_prefix("refs/heads/") else {
+    let text = out.stdout.trim_end_matches(['\r', '\n']);
+    for line in text.split('\n') {
+        if line.is_empty() {
             continue;
+        }
+        let Some((sha, name)) = line.split_once('\0') else {
+            return Err(format!("head line is not a sha and a ref: {line}"));
         };
-        if sha.len() != 40 {
+        if !name.starts_with("refs/heads/") {
+            continue;
+        }
+        if sha.len() != 40 || !sha.chars().all(|c| c.is_ascii_hexdigit()) {
             return Err(format!("head {name} is not a commit sha"));
         }
-        if !wanted(name, trunk, include, exclude) {
+        if !wanted(short_of(name), trunk, include, exclude) {
             continue;
         }
         heads.push(Head {
@@ -669,16 +735,25 @@ fn wanted(name: &str, trunk: &str, include: &[String], exclude: &[String]) -> bo
 }
 
 fn name_ok(name: &str) -> bool {
-    !name.is_empty()
-        && !name.contains(['|', ' ', '\n', '\r', '\t'])
-        && !name.starts_with('-')
-        && !name.contains(':')
+    !name.is_empty() && !name.contains(['|', ' ', '\n', '\r', '\t']) && !name.contains(':')
+}
+
+fn short_of(name: &str) -> &str {
+    name.strip_prefix("refs/heads/").unwrap_or(name)
+}
+
+fn head_ref(name: &str) -> String {
+    if name.starts_with("refs/") {
+        name.to_string()
+    } else {
+        format!("refs/heads/{name}")
+    }
 }
 
 fn snapshot(heads: &[Head]) -> String {
     let mut lines: Vec<String> = heads
         .iter()
-        .map(|h| format!("refs/heads/{} {}", h.name, h.sha))
+        .map(|h| format!("{} {}", h.name, h.sha))
         .collect();
     lines.sort();
     let mut hasher = Sha256::new();
@@ -689,49 +764,68 @@ fn snapshot(heads: &[Head]) -> String {
     format!("sha256:{}", hex(&hasher.finalize()))
 }
 
-fn is_ancestor(repo: &Path, older: &str, newer: &str) -> Result<bool, String> {
-    let out = git(repo, &["merge-base", "--is-ancestor", older, newer])?;
-    Ok(out.status == 0)
-}
-
-fn ahead_behind(repo: &Path, trunk: &str, branch: &str) -> Result<(u64, u64), String> {
-    let spec = format!("{trunk}...{branch}");
-    let text = git_ok(repo, &["rev-list", "--left-right", "--count", &spec])?;
-    let mut parts = text.split_whitespace();
-    let behind = parts
-        .next()
-        .ok_or_else(|| format!("ahead/behind for {branch}"))?
-        .parse()
-        .map_err(|_| format!("ahead/behind for {branch}"))?;
-    let ahead = parts
-        .next()
-        .ok_or_else(|| format!("ahead/behind for {branch}"))?
-        .parse()
-        .map_err(|_| format!("ahead/behind for {branch}"))?;
-    Ok((behind, ahead))
-}
-
-fn author_range(repo: &Path, trunk: &str, branch: &str) -> Result<(String, String), String> {
-    let range = format!("{trunk}..{branch}");
-    let text = git_ok(repo, &["log", "--format=%aI", &range])?;
-    let mut dates: Vec<&str> = text.lines().filter(|l| !l.is_empty()).collect();
-    if dates.is_empty() {
-        let tip = git_ok(repo, &["log", "-1", "--format=%aI", branch])?;
-        return Ok((tip.clone(), tip));
+fn merge_base(repo: &Path, left: &str, right: &str) -> Result<Option<String>, String> {
+    let out = gitutil::git(repo, &["merge-base", "--end-of-options", left, right]);
+    if out.status == 0 {
+        let sha = out.stdout.trim();
+        if sha.len() == 40 && sha.chars().all(|c| c.is_ascii_hexdigit()) {
+            return Ok(Some(sha.to_string()));
+        }
+        return Err(format!("merge-base {left} {right}: {sha}"));
     }
-    dates.sort_unstable();
-    Ok((dates[0].to_string(), dates[dates.len() - 1].to_string()))
+    if out.status == 1 && out.stderr.trim().is_empty() {
+        return Ok(None);
+    }
+    Err(format!("merge-base {left} {right}: {}", out.stderr.trim()))
+}
+
+fn author_range(repo: &Path, trunk: &str, branch: &str) -> Result<(String, String, i64), String> {
+    let range = format!("{trunk}..{branch}");
+    let text = git_ok(
+        repo,
+        &["log", "--format=%at %aI", "--end-of-options", &range],
+    )?;
+    let mut dates = parse_stamps(&text)?;
+    if dates.is_empty() {
+        let tip = git_ok(
+            repo,
+            &["log", "-1", "--format=%at %aI", "--end-of-options", branch],
+        )?;
+        dates = parse_stamps(&tip)?;
+    }
+    if dates.is_empty() {
+        return Err(format!("author date for {branch}"));
+    }
+    dates.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
+    let old = &dates[0];
+    let new = &dates[dates.len() - 1];
+    Ok((old.1.clone(), new.1.clone(), new.0))
+}
+
+fn parse_stamps(text: &str) -> Result<Vec<(i64, String)>, String> {
+    let mut out = Vec::new();
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let Some((epoch, display)) = line.split_once(' ') else {
+            return Err(format!("author date {line}"));
+        };
+        let epoch = epoch
+            .parse::<i64>()
+            .map_err(|_| format!("author date {line}"))?;
+        out.push((epoch, display.to_string()));
+    }
+    Ok(out)
 }
 
 fn cherry(repo: &Path, trunk: &str, branch: &str) -> Result<Vec<Cherry>, String> {
-    let out = git(repo, &["cherry", trunk, branch])?;
+    let out = gitutil::git(repo, &["cherry", "--end-of-options", trunk, branch]);
     if out.status != 0 {
-        return Err(format!(
-            "cherry {branch}: {}",
-            String::from_utf8_lossy(&out.stderr).trim()
-        ));
+        return Err(format!("cherry {branch}: {}", out.stderr.trim()));
     }
-    let text = String::from_utf8_lossy(&out.stdout);
+    let text = out.stdout;
     let mut rows = Vec::new();
     for line in text.lines() {
         let line = line.trim();
@@ -768,10 +862,23 @@ fn squash_hit(
     };
     let listed = git_ok(
         repo,
-        &["rev-list", "--reverse", &format!("{base}..{trunk}")],
+        &[
+            "rev-list",
+            "--reverse",
+            "--end-of-options",
+            &format!("{base}..{trunk}"),
+        ],
     )?;
     for commit in listed.lines().filter(|l| !l.is_empty()) {
-        let parent = match git_ok(repo, &["rev-parse", "--verify", &format!("{commit}^")]) {
+        let parent = match git_ok(
+            repo,
+            &[
+                "rev-parse",
+                "--verify",
+                "--end-of-options",
+                &format!("{commit}^"),
+            ],
+        ) {
             Ok(parent) => parent,
             Err(_) => continue,
         };
@@ -783,9 +890,17 @@ fn squash_hit(
 }
 
 fn patch_id(repo: &Path, from: &str, to: &str) -> Result<Option<String>, String> {
-    let diff = git(
+    let diff = git_bytes(
         repo,
-        &["diff", "--no-color", "--binary", "--full-index", from, to],
+        &[
+            "diff",
+            "--no-color",
+            "--binary",
+            "--full-index",
+            "--end-of-options",
+            from,
+            to,
+        ],
     )?;
     if diff.status != 0 {
         return Err(format!(
@@ -809,39 +924,35 @@ fn patch_id(repo: &Path, from: &str, to: &str) -> Result<Option<String>, String>
 }
 
 fn merge_outcome(repo: &Path, trunk: &str, branch: &str) -> Result<Merge, String> {
-    let out = git(
-        repo,
-        &["merge-tree", "--write-tree", "--name-only", trunk, branch],
-    )?;
-    let text = String::from_utf8_lossy(&out.stdout);
-    let mut lines = text.lines();
-    let tree = lines.next().unwrap_or("").trim().to_string();
-    let mut conflicts = Vec::new();
-    if out.status != 0 {
-        for line in text.lines().skip(1) {
-            let path = line.trim();
-            if path.is_empty() || path.contains(' ') {
-                continue;
-            }
-            conflicts.push(path.to_string());
-        }
-    } else if tree.len() != 40 {
-        return Err(format!(
-            "merge-tree {branch}: {}",
-            String::from_utf8_lossy(&out.stderr).trim()
-        ));
+    let (clean, tree, conflicts) = gitutil::merge_tree(repo, trunk, branch);
+    if clean && tree.len() != 40 {
+        return Err(format!("merge-tree {branch}"));
     }
     Ok(Merge {
-        clean: out.status == 0,
+        clean,
         tree,
         conflicts,
     })
 }
 
 fn branch_exists(repo: &Path, branch: &str) -> Result<bool, String> {
-    let spec = format!("refs/heads/{branch}");
-    let out = git(repo, &["rev-parse", "--verify", "--quiet", &spec])?;
+    let spec = head_ref(branch);
+    let out = gitutil::git(
+        repo,
+        &[
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            "--end-of-options",
+            &spec,
+        ],
+    );
     Ok(out.status == 0)
+}
+
+fn live_sha(repo: &Path, branch: &str) -> Result<String, String> {
+    let spec = head_ref(branch);
+    git_ok(repo, &["rev-parse", "--verify", "--end-of-options", &spec])
 }
 
 fn locate(repo: &Path) -> Result<PathBuf, String> {
@@ -859,12 +970,12 @@ fn clone_bare(src: &Path, dst: &Path) -> Result<(), String> {
     let dst = dst
         .to_str()
         .ok_or_else(|| "store path is not utf-8".to_string())?;
-    let out = git_raw(&["clone", "--bare", "--no-local", "--", src, dst])?;
+    let out = gitutil::git(
+        Path::new("."),
+        &["clone", "--bare", "--no-local", "--", src, dst],
+    );
     if out.status != 0 {
-        return Err(format!(
-            "clone: {}",
-            String::from_utf8_lossy(&out.stderr).trim()
-        ));
+        return Err(format!("clone: {}", out.stderr.trim()));
     }
     Ok(())
 }
@@ -887,34 +998,24 @@ fn write_text(path: &Path, text: &str) -> Result<(), String> {
     fs::write(path, text).map_err(|e| e.to_string())
 }
 
-fn git(repo: &Path, args: &[&str]) -> Result<Out, String> {
+fn git_bytes(repo: &Path, args: &[&str]) -> Result<Out, String> {
     let mut cmd = command();
     cmd.arg("--no-pager").arg("-C").arg(repo).args(args);
     spawn(cmd, None)
 }
 
 fn git_ok(repo: &Path, args: &[&str]) -> Result<String, String> {
-    let out = git(repo, args)?;
+    let out = gitutil::git(repo, args);
     if out.status != 0 {
-        return Err(format!(
-            "{}: {}",
-            args.join(" "),
-            String::from_utf8_lossy(&out.stderr).trim()
-        ));
+        return Err(format!("{}: {}", args.join(" "), out.stderr.trim()));
     }
-    Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+    Ok(out.stdout.trim().to_string())
 }
 
 fn git_stdin(args: &[&str], stdin: &[u8]) -> Result<Out, String> {
     let mut cmd = command();
     cmd.arg("--no-pager").args(args);
     spawn(cmd, Some(stdin))
-}
-
-fn git_raw(args: &[&str]) -> Result<Out, String> {
-    let mut cmd = command();
-    cmd.arg("--no-pager").args(args);
-    spawn(cmd, None)
 }
 
 fn command() -> Command {

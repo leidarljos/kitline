@@ -12,7 +12,17 @@ pub fn git(dir: &Path, args: &[&str]) -> GitOut {
         .arg("--no-pager")
         .args(args)
         .current_dir(dir)
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_SYSTEM", "/dev/null")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_CONFIG_COUNT", "0")
+        .env("LC_ALL", "C")
+        .env("TZ", "UTC")
+        .env("GIT_PAGER", "cat")
         .env("GIT_TERMINAL_PROMPT", "0")
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .env_remove("GIT_INDEX_FILE")
         .output();
     match out {
         Ok(out) => GitOut {
@@ -49,7 +59,18 @@ pub fn is_ancestor(dir: &Path, older: &str, newer: &str) -> bool {
     if older.is_empty() || newer.is_empty() {
         return false;
     }
-    git(dir, &["merge-base", "--is-ancestor", older, newer]).status == 0
+    git(
+        dir,
+        &[
+            "merge-base",
+            "--is-ancestor",
+            "--end-of-options",
+            older,
+            newer,
+        ],
+    )
+    .status
+        == 0
 }
 
 pub fn strict_ancestor(dir: &Path, older: &str, newer: &str) -> bool {
@@ -61,7 +82,16 @@ pub fn ahead_behind(dir: &Path, target: &str, head: &str) -> Option<(u64, u64)> 
         return None;
     }
     let spec = format!("{target}...{head}");
-    let text = ok(dir, &["rev-list", "--left-right", "--count", &spec])?;
+    let text = ok(
+        dir,
+        &[
+            "rev-list",
+            "--left-right",
+            "--count",
+            "--end-of-options",
+            &spec,
+        ],
+    )?;
     let mut parts = text.split_whitespace();
     let behind = parts.next()?.parse().ok()?;
     let ahead = parts.next()?.parse().ok()?;
@@ -139,33 +169,35 @@ pub fn diff_names(dir: &Path, base: &str, head: &str) -> Vec<String> {
         .collect()
 }
 
-pub fn merge_tree(dir: &Path, left: &str, right: &str) -> (bool, Vec<String>) {
+pub fn merge_tree(dir: &Path, left: &str, right: &str) -> (bool, String, Vec<String>) {
     if left.is_empty() || right.is_empty() {
-        return (true, Vec::new());
+        return (true, String::new(), Vec::new());
     }
     let out = git(
         dir,
-        &["merge-tree", "--write-tree", "--name-only", left, right],
+        &[
+            "merge-tree",
+            "--write-tree",
+            "--name-only",
+            "-z",
+            "--end-of-options",
+            left,
+            right,
+        ],
     );
+    let mut parts = out.stdout.split('\0');
+    let tree = parts.next().unwrap_or("").trim().to_string();
     if out.status == 0 {
-        return (true, Vec::new());
+        return (true, tree, Vec::new());
     }
     let mut files = Vec::new();
-    for line in out.stdout.lines() {
-        let t = line.trim();
-        if t.is_empty()
-            || t.starts_with("Auto-merging")
-            || t.starts_with("CONFLICT")
-            || t.contains(' ')
-        {
-            continue;
+    for part in parts {
+        if part.is_empty() {
+            break;
         }
-        if t.len() == 40 && t.chars().all(|c| c.is_ascii_hexdigit()) {
-            continue;
-        }
-        files.push(t.to_string());
+        files.push(part.to_string());
     }
-    (false, files)
+    (false, tree, files)
 }
 
 pub fn commits_on(dir: &Path, base: &str, tip: &str) -> Vec<String> {

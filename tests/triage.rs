@@ -123,8 +123,45 @@ fn triage(repo: &Path, out: &Path) -> std::process::Output {
             "--out",
             out.to_str().unwrap(),
         ])
+        .current_dir(out.parent().unwrap())
         .output()
         .unwrap()
+}
+
+/// grade/<grade>/<bucket>[/slug], plus the named heads this round adds.
+fn label(short: &str) -> (String, String) {
+    if short == "v1" {
+        return ("patch-equal".into(), "drop".into());
+    }
+    if short == "HEAD" {
+        return ("open".into(), "rest".into());
+    }
+    if short == "--output=x" || short == "grade/open/dates" {
+        return ("open".into(), "rest".into());
+    }
+    if short == "grade/open/space" {
+        return ("open".into(), "rebase".into());
+    }
+    if short.chars().any(|c| c == '\u{00a0}') {
+        return ("open".into(), "rest".into());
+    }
+    let mut parts = short.split('/');
+    assert_eq!(parts.next(), Some("grade"), "{short}");
+    let grade = parts.next().unwrap_or("").to_string();
+    let bucket = parts.next().unwrap_or("").to_string();
+    assert!(!grade.is_empty() && !bucket.is_empty(), "{short}");
+    (grade, bucket)
+}
+
+fn bucket_title(bucket: &str) -> &'static str {
+    match bucket {
+        "keep" => "KEEP",
+        "drop" => "DROP",
+        "rebase" => "REBASE",
+        "rest" => "REST",
+        "unsorted" => "UNSORTED",
+        other => panic!("bucket {other}"),
+    }
 }
 
 /// P21: every labelled head lands in the grade its name says.
@@ -180,10 +217,18 @@ fn p21_fixture_grades_match_labels() {
     assert!(snap.starts_with("sha256:"), "{snap}");
     assert_eq!(snap.len(), "sha256:".len() + 64);
 
+    let cwd = std::env::current_dir().unwrap();
+    for path in [repo.join("x"), root.join("x"), cwd.join("x")] {
+        assert!(!path.exists(), "created {}", path.display());
+    }
+
     let mut seen = BTreeMap::new();
     for (branch, row) in &plan.rows {
         let section = plan.section.get(branch).unwrap();
-        if branch == "main" {
+        let short = branch
+            .strip_prefix("refs/heads/")
+            .unwrap_or_else(|| panic!("short name {branch}"));
+        if short == "main" {
             assert_eq!(section, "KEEP");
             assert_eq!(row.get("grade").map(String::as_str), Some("keep"));
             assert_eq!(row.get("ahead").map(String::as_str), Some("0"));
@@ -191,25 +236,16 @@ fn p21_fixture_grades_match_labels() {
             seen.insert(branch.clone(), section.clone());
             continue;
         }
-        let mut parts = branch.split('/');
-        assert_eq!(parts.next(), Some("grade"), "{branch}");
-        let grade = parts.next().unwrap();
-        let bucket = parts.next().unwrap();
-        assert!(parts.next().is_none(), "{branch}");
+        let (grade, bucket) = label(short);
         assert_eq!(
             row.get("grade").map(String::as_str),
-            Some(grade),
+            Some(grade.as_str()),
             "{branch}"
         );
-        let want = match bucket {
-            "keep" => "KEEP",
-            "drop" => "DROP",
-            "rebase" => "REBASE",
-            "rest" => "REST",
-            other => panic!("bucket {other}"),
-        };
-        assert_eq!(section, want, "{branch}");
-        assert!(!row.get("base").unwrap().is_empty(), "{branch}");
+        assert_eq!(section, bucket_title(&bucket), "{branch}");
+        if grade != "unrelated" {
+            assert!(!row.get("base").unwrap().is_empty(), "{branch}");
+        }
         assert!(!row.get("author_old").unwrap().is_empty(), "{branch}");
         assert!(!row.get("author_new").unwrap().is_empty(), "{branch}");
         row.get("ahead").unwrap().parse::<u64>().unwrap();
@@ -217,33 +253,33 @@ fn p21_fixture_grades_match_labels() {
         seen.insert(branch.clone(), section.clone());
     }
 
-    let noop = plan.rows.get("grade/no-op/drop").unwrap();
+    let noop = plan.rows.get("refs/heads/grade/no-op/drop").unwrap();
     assert!(noop.get("author_old").unwrap().starts_with("2020-01-07"));
     assert!(noop.get("author_new").unwrap().starts_with("2020-01-08"));
     assert_eq!(noop.get("check").map(String::as_str), Some("no-op"));
     assert!(!noop.get("evidence").unwrap().is_empty());
 
-    let ancestor = plan.rows.get("grade/ancestor/drop").unwrap();
+    let ancestor = plan.rows.get("refs/heads/grade/ancestor/drop").unwrap();
     assert_eq!(ancestor.get("ahead").map(String::as_str), Some("0"));
     assert_eq!(ancestor.get("check").map(String::as_str), Some("ancestor"));
     assert!(ancestor.get("evidence").unwrap().contains("is-ancestor"));
 
-    let equal = plan.rows.get("grade/patch-equal/drop").unwrap();
+    let equal = plan.rows.get("refs/heads/grade/patch-equal/drop").unwrap();
     assert_eq!(equal.get("check").map(String::as_str), Some("patch-equal"));
     assert!(!equal.get("evidence").unwrap().is_empty());
-    let reverted = plan.rows.get("grade/patch-equal/rest").unwrap();
+    let reverted = plan.rows.get("refs/heads/grade/patch-equal/rest").unwrap();
     assert_eq!(reverted.get("check").map(String::as_str), Some(""));
     assert_eq!(
         reverted.get("reason").map(String::as_str),
         Some("merged then reverted or modified upstream")
     );
 
-    let partial = plan.rows.get("grade/partial/rebase").unwrap();
+    let partial = plan.rows.get("refs/heads/grade/partial/rebase").unwrap();
     assert!(!partial.get("dropped").unwrap().is_empty());
-    let conflict = plan.rows.get("grade/open/rebase").unwrap();
+    let conflict = plan.rows.get("refs/heads/grade/open/rebase").unwrap();
     assert_eq!(conflict.get("applies").map(String::as_str), Some("no"));
     assert!(conflict.get("conflicts").unwrap().contains("conflict.txt"));
-    let applies = plan.rows.get("grade/open/rest").unwrap();
+    let applies = plan.rows.get("refs/heads/grade/open/rest").unwrap();
     assert_eq!(applies.get("applies").map(String::as_str), Some("yes"));
     assert!(applies.get("behind").unwrap().parse::<u64>().unwrap() > 0);
 
@@ -254,16 +290,47 @@ fn p21_fixture_grades_match_labels() {
         }
     }
 
+    let v1 = plan.rows.get("refs/heads/v1").unwrap();
+    assert_eq!(v1.get("check").map(String::as_str), Some("patch-equal"));
+    assert_ne!(
+        v1.get("sha").map(String::as_str),
+        Some(git(&repo, &["rev-parse", "refs/tags/v1"]).as_str()),
+        "v1 was graded as the tag"
+    );
+    let span = plan.rows.get("refs/heads/grade/open/dates").unwrap();
+    assert_eq!(
+        span.get("author_old").map(String::as_str),
+        Some("2020-01-02T00:00:00+00:00")
+    );
+    assert_eq!(
+        span.get("author_new").map(String::as_str),
+        Some("2020-01-01T23:00:00-05:00")
+    );
+    let space = plan.rows.get("refs/heads/grade/open/space").unwrap();
+    assert_eq!(space.get("applies").map(String::as_str), Some("no"));
+    assert!(
+        space.get("conflicts").unwrap().contains("my file.txt"),
+        "{space:?}"
+    );
+    let orphan = plan
+        .rows
+        .get("refs/heads/grade/unrelated/unsorted")
+        .unwrap();
+    assert_eq!(orphan.get("reason").map(String::as_str), Some("unrelated"));
+    assert!(plan.rows.keys().any(|k| k.contains('\u{00a0}')));
+    assert!(plan.rows.contains_key("refs/heads/--output=x"));
+    assert!(plan.rows.contains_key("refs/heads/HEAD"));
+
     let listed = git(
         &repo,
-        &["for-each-ref", "--format=%(refname:short)", "refs/heads"],
+        &["for-each-ref", "--format=%(refname)", "refs/heads"],
     );
     let mut names: Vec<&str> = listed.lines().collect();
     names.sort_unstable();
     let mut planned: Vec<&str> = plan.rows.keys().map(String::as_str).collect();
     planned.sort_unstable();
     assert_eq!(planned, names);
-    for key in ["keep", "drop", "rebase", "rest"] {
+    for key in ["keep", "drop", "rebase", "rest", "unsorted"] {
         let n = seen
             .values()
             .filter(|s| s.eq_ignore_ascii_case(key))
@@ -299,15 +366,29 @@ fn p22_verify_fails_after_drop_moves() {
         String::from_utf8_lossy(&verify.stderr)
     );
 
-    git(&repo, &["checkout", "-q", "grade/ancestor/drop"]);
+    let text = fs::read_to_string(&plan_path).unwrap();
+    let plan = parse(&text);
+    assert_eq!(
+        plan.section.get("refs/heads/v1").map(String::as_str),
+        Some("DROP")
+    );
+    let tag = git(&repo, &["rev-parse", "refs/tags/v1"]);
+    // checkout of the full ref detaches, so point the branch at the new commit.
+    git(&repo, &["checkout", "-q", "--detach", "refs/heads/v1"]);
     fs::write(repo.join("moved.txt"), "moved\n").unwrap();
     git(&repo, &["add", "moved.txt"]);
     git(&repo, &["commit", "-qm", "move the drop head"]);
+    let tip = fs::read_to_string(repo.join(".git/HEAD")).unwrap();
+    let tip = tip.trim();
+    assert_eq!(tip.len(), 40, "{tip}");
+    git(&repo, &["update-ref", "refs/heads/v1", tip]);
+    assert_eq!(git(&repo, &["rev-parse", "refs/tags/v1"]), tag);
+    assert_ne!(git(&repo, &["rev-parse", "refs/heads/v1"]), tag);
     let again = Command::new(env!("CARGO_BIN_EXE_kitline"))
         .args(["triage", "verify", plan_path.to_str().unwrap()])
         .output()
         .unwrap();
     assert_ne!(again.status.code(), Some(0));
     let err = String::from_utf8_lossy(&again.stderr);
-    assert!(err.contains("grade/ancestor/drop"), "{err}");
+    assert!(err.contains("refs/heads/v1"), "{err}");
 }

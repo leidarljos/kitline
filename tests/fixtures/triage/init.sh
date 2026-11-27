@@ -88,6 +88,52 @@ git checkout -q -b grade/keep/keep "$fork"
 printf 'rel\n' > release.txt
 cmt 2022-02-02T00:00:00Z release
 
+# v1: own commit, patch already on trunk. Tag v1 is a different ancestor.
+git checkout -q -b v1 "$fork"
+printf 'v1\n' > v1.txt
+cmt 2020-03-01T00:00:00Z v1-unique
+v1feat=$(git rev-parse HEAD)
+
+# HEAD: unique work, not the symbolic HEAD. The ref is created at the end
+# so later commands still resolve HEAD to the symbolic ref.
+git checkout -q -b tmp-head "$fork"
+printf 'head\n' > head.txt
+cmt 2020-03-02T00:00:00Z head-unique
+headsha=$(git rev-parse HEAD)
+git checkout -q main
+git branch -D tmp-head
+
+# Leading-dash name. Must not be parsed as an option.
+git checkout -q -b tmp-out "$fork"
+printf 'out\n' > out.txt
+cmt 2020-03-03T00:00:00Z out-unique
+git update-ref refs/heads/--output=x HEAD
+git checkout -q main
+git branch -D tmp-out
+
+# U+00A0 in the name (UTF-8 c2 a0). Not ASCII space.
+git checkout -q -b tmp-nbsp "$fork"
+printf 'nbsp\n' > nbsp.txt
+cmt 2020-03-04T00:00:00Z nbsp-unique
+nbsp=$(printf 'foo\302\240bar')
+git update-ref "refs/heads/${nbsp}" HEAD
+git checkout -q main
+git branch -D tmp-nbsp
+
+# Author instants whose %aI text order is not epoch order.
+# Label: open / rest. Named dates so it does not sit under grade/open/rest.
+git checkout -q -b grade/open/dates "$fork"
+printf 'early\n' > span.txt
+cmt 2020-01-02T00:00:00Z span-early
+printf 'late\n' > span.txt
+cmt 2020-01-01T23:00:00-05:00 span-late
+
+# Conflict path contains a space.
+# Label: open / rebase.
+git checkout -q -b grade/open/space "$fork"
+printf 'branch\n' > "my file.txt"
+cmt 2021-04-01T00:00:00Z space-conflict
+
 git checkout -q main
 printf 'trunk\n' > trunk.txt
 cmt 2020-02-01T00:00:00Z trunk-moves
@@ -99,4 +145,20 @@ cmt 2020-02-02T00:00:00Z squash-sq
 at 2020-02-02T00:00:01Z git cherry-pick "$part"
 printf 'main\n' > conflict.txt
 cmt 2020-02-03T00:00:00Z main-conflict
+at 2020-02-03T00:00:01Z git cherry-pick "$v1feat"
+printf 'main\n' > "my file.txt"
+cmt 2020-02-04T00:00:00Z main-space
+git tag v1 "$fork"
+
+# Orphan: no merge base with main.
+blob=$(printf 'orphan\n' | git hash-object -w --stdin)
+tree=$(printf '100644 blob %s\torphan.txt\n' "$blob" | git mktree)
+orph=$(
+  GIT_AUTHOR_DATE=2020-05-01T00:00:00Z
+  GIT_COMMITTER_DATE=2020-05-01T00:00:00Z
+  export GIT_AUTHOR_DATE GIT_COMMITTER_DATE
+  git commit-tree "$tree" -m orphan
+)
+git update-ref refs/heads/grade/unrelated/unsorted "$orph"
+git update-ref refs/heads/HEAD "$headsha"
 git checkout -q main
