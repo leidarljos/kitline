@@ -1,3 +1,8 @@
+[workspace]
+resolver = "2"
+members = [".", "crates/kitline-core"]
+default-members = [".", "crates/kitline-core"]
+
 [package]
 name = "kitline"
 version = "0.1.0"

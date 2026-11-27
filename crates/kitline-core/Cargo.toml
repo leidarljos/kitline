@@ -1,0 +1,18 @@
+[package]
+name = "kitline-core"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.89"
+license = "MIT"
+description = "Change identity, revision ids, and kit deeds"
+publish = false
+
+[dependencies]
+claimdag = { git = "https://github.com/leidarljos/claimdag", rev = "8e0f98d846ddc5848abf950936e83019e8426879" }
+deedar = { git = "https://github.com/leidarljos/deedar", rev = "4fc453a799f9aff9e8f5ccd35f768e1efb07834a" }
+serde = { version = "1", features = ["derive"] }
+sha2 = "0.10"
+toml = "0.8"
+
+[dev-dependencies]
+deedar = { git = "https://github.com/leidarljos/deedar", rev = "4fc453a799f9aff9e8f5ccd35f768e1efb07834a" }
