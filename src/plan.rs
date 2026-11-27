@@ -25,10 +25,11 @@ struct Cli {
     public: bool,
     #[arg(long)]
     strict: bool,
-    #[arg(long)]
+    /// Hidden. The ticket scan adds an edge both ways and matches id text.
+    #[arg(long, hide = true)]
     tickets: bool,
-    /// Read-only git ls-remote. Off for a local plan.
-    #[arg(long)]
+    /// Hidden. ls-remote matches ref names, so a sha is reported missing.
+    #[arg(long, hide = true)]
     online: bool,
 }
 

@@ -1,6 +1,10 @@
 #+title: kitline
 #+options: toc:nil num:nil ^:{}
 
+[[file:assets/kitline-logo.png]]
+
+Triage, stamp, and track are the commands a bot runs. See QUICKSTART.org.
+
 kitline reads one TOML (Tom's Obvious Minimal Language) workspace.
 It writes an org report and a POSIX sh script.
 The script lists the commands for nodes that are ready to merge.

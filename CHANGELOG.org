@@ -14,3 +14,5 @@ A workspace file becomes an org report and a POSIX script for the ready slice.
 - ABI, capnp, and schema claims
 - Patch, privacy, and trailer rules
 - Batch order, cycles, and a rerun after a landing
+- Triage groups stacks and writes the landing order
+- stamp and track for a Kitline-Change trailer

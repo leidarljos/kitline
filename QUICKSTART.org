@@ -1,0 +1,20 @@
+#+title: kitline quickstart
+#+options: toc:nil num:nil ^:{}
+
+A bare clone, then a plan. kitline does not push.
+
+#+begin_src sh
+git clone --bare https://github.com/leidarljos/ljos.git /tmp/ljos.git
+kitline triage /tmp/ljos.git --trunk main --out plan.org
+#+end_src
+
+plan.org has DROP, STACKS, and ORDER. Parents land before children.
+
+#+begin_src sh
+kitline stamp -m "subject line"
+kitline track HEAD
+kitline triage verify plan.org
+#+end_src
+
+stamp prints a message carrying Kitline-Change. track prints that id.
+verify re-checks every DROP row.

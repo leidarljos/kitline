@@ -1,15 +1,18 @@
-//! Triage phases 1, 2 and 6.
+//! Triage phases 1, 2 and 6, plus a landing order.
 //!
 //! Phase 1 inventories every head. Phase 2 grades what is already
 //! upstream with patch-id, cherry and merge-base. Phase 6 records
 //! freshness. The plan lists KEEP, DROP, REBASE, the remaining heads, and
-//! an unrelated head as UNSORTED. Rows use `refs/heads/...`. Git commands
-//! take the commit sha. `triage verify` re-reads that ref and re-runs each
-//! DROP check.
+//! an unrelated head as UNSORTED. Heads that still need a decision are
+//! grouped into stacks: a head whose tip contains another head is stacked
+//! on it. ORDER lists parents first, which is the land sequence.
+//! Rows use full ref names. Git commands take the commit sha.
+//! `triage verify` re-reads that ref and re-runs each DROP check.
 
 use crate::gitutil;
 use clap::Parser;
 use sha2::{Digest, Sha256};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::ffi::OsStr;
 use std::fs;
 use std::io::Write;
@@ -17,6 +20,10 @@ use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
+
+/// Patch-id of a trunk commit against its first parent. `None` is a root
+/// or an empty diff. Shared across heads so each trunk commit is diffed once.
+type PatchCache = HashMap<String, Option<String>>;
 
 const COLS: &[&str] = &[
     "branch",
@@ -41,6 +48,9 @@ struct TriageCli {
     /// Trunk head to grade against.
     #[arg(long, default_value = "main")]
     trunk: String,
+    /// Remote used when the trunk is not a local head.
+    #[arg(long, default_value = "origin")]
+    remote: String,
     /// Org plan to write.
     #[arg(long, default_value = "plan.org")]
     out: PathBuf,
@@ -187,12 +197,7 @@ fn plan(cli: &TriageCli) -> Result<(), String> {
     let scratch = scratch_dir()?;
     let bare = scratch.path.join("bare.git");
     clone_bare(&repo, &bare)?;
-    let trunk_ref = format!("refs/heads/{}", cli.trunk);
-    let trunk_sha = git_ok(
-        &bare,
-        &["rev-parse", "--verify", "--end-of-options", &trunk_ref],
-    )
-    .map_err(|_| format!("trunk {} is not a head", cli.trunk))?;
+    let trunk_sha = trunk_tip(&bare, &cli.trunk, &cli.remote)?;
     let trunk_tree = git_ok(
         &bare,
         &[
@@ -217,13 +222,16 @@ fn plan(cli: &TriageCli) -> Result<(), String> {
         trunk_tree: &trunk_tree,
     };
     let mut rows = Vec::with_capacity(heads.len());
+    let mut patches = PatchCache::new();
     for head in &heads {
         let short = short_of(&head.name);
         let kept =
             short == cli.trunk.as_bytes() || cli.keep.iter().any(|pat| glob_match(pat, short));
-        rows.push(classify(&ctx, head, kept)?);
+        rows.push(classify(&ctx, head, kept, &mut patches)?);
     }
-    let text = render(&repo, &cli.trunk, &trunk_sha, &snap, &rows)?;
+    let land = land_plan(&bare, &rows)?;
+    let mut text = render(&repo, &cli.trunk, &cli.remote, &trunk_sha, &snap, &rows)?;
+    text.push_str(&land.text);
     write_text(&cli.out, &text)?;
     for bucket in [
         Bucket::Keep,
@@ -235,22 +243,22 @@ fn plan(cli: &TriageCli) -> Result<(), String> {
         let n = rows.iter().filter(|r| r.bucket == bucket).count();
         println!("{} {n}", bucket.key());
     }
+    println!("stacks {}", land.stacks);
+    println!("order {}", land.order);
+    for line in &land.lines {
+        println!("{line}");
+    }
     println!("wrote {}", cli.out.display());
     Ok(())
 }
 
 fn verify(path: &Path) -> Result<(), String> {
     let text = fs::read_to_string(path).map_err(|e| format!("bad plan: {e}"))?;
-    let (repo, trunk, drops) = parse_drops(&text)?;
+    let (repo, trunk, remote, drops) = parse_drops(&text)?;
     let scratch = scratch_dir()?;
     let bare = scratch.path.join("bare.git");
     clone_bare(&repo, &bare)?;
-    let trunk_ref = format!("refs/heads/{trunk}");
-    let trunk_sha = git_ok(
-        &bare,
-        &["rev-parse", "--verify", "--end-of-options", &trunk_ref],
-    )
-    .map_err(|_| format!("trunk {trunk} is not a head"))?;
+    let trunk_sha = trunk_tip(&bare, &trunk, &remote)?;
     let trunk_tree = git_ok(
         &bare,
         &[
@@ -267,6 +275,7 @@ fn verify(path: &Path) -> Result<(), String> {
         trunk_tree: &trunk_tree,
     };
     let mut failed = Vec::new();
+    let mut patches = PatchCache::new();
     for row in &drops {
         if row.grade != row.check || row.check.is_empty() {
             failed.push(format!("drop does not hold: {}", escape_cell(&row.branch)));
@@ -280,7 +289,7 @@ fn verify(path: &Path) -> Result<(), String> {
         // Re-read the live tip of the full ref. The sha in the plan is only
         // the evidence from plan time.
         let live = live_sha(&bare, &full)?;
-        let holds = check_holds(&ctx, &live, &row.check)?;
+        let holds = check_holds(&ctx, &live, &row.check, &mut patches)?;
         if !holds {
             failed.push(format!("drop does not hold: {}", escape_cell(&row.branch)));
         }
@@ -292,7 +301,12 @@ fn verify(path: &Path) -> Result<(), String> {
     }
 }
 
-fn check_holds(ctx: &Ctx<'_>, sha: &str, check: &str) -> Result<bool, String> {
+fn check_holds(
+    ctx: &Ctx<'_>,
+    sha: &str,
+    check: &str,
+    patches: &mut PatchCache,
+) -> Result<bool, String> {
     let merge = merge_outcome(ctx.repo, ctx.trunk_sha, sha)?;
     let noop = merge.clean && merge.tree == ctx.trunk_tree;
     match check {
@@ -306,7 +320,7 @@ fn check_holds(ctx: &Ctx<'_>, sha: &str, check: &str) -> Result<bool, String> {
             let Some(base) = merge_base(ctx.repo, ctx.trunk_sha, sha)? else {
                 return Ok(false);
             };
-            let hit = squash_hit(ctx.repo, &base, ctx.trunk_sha, sha)?;
+            let hit = squash_hit(ctx.repo, &base, ctx.trunk_sha, sha, patches)?;
             Ok(hit.is_some() && noop)
         }
         "no-op" => Ok(noop),
@@ -314,7 +328,12 @@ fn check_holds(ctx: &Ctx<'_>, sha: &str, check: &str) -> Result<bool, String> {
     }
 }
 
-fn classify(ctx: &Ctx<'_>, head: &Head, kept: bool) -> Result<Row, String> {
+fn classify(
+    ctx: &Ctx<'_>,
+    head: &Head,
+    kept: bool,
+    patches: &mut PatchCache,
+) -> Result<Row, String> {
     let short = short_of(&head.name);
     if !name_ok(short) {
         return Err(format!(
@@ -350,7 +369,7 @@ fn classify(ctx: &Ctx<'_>, head: &Head, kept: bool) -> Result<Row, String> {
     let applies = if merge.clean { "yes" } else { "no" };
     let conflicts = join_list(&merge.conflicts);
     let noop = merge.clean && merge.tree == ctx.trunk_tree;
-    let decided = decide(ctx, head, kept, &base, &merge, noop)?;
+    let decided = decide(ctx, head, kept, &base, &merge, noop, patches)?;
 
     Ok(Row {
         branch: head.name.clone(),
@@ -410,6 +429,7 @@ fn decide(
     base: &str,
     merge: &Merge,
     noop: bool,
+    patches: &mut PatchCache,
 ) -> Result<Decision, String> {
     if kept {
         let reason = if short_of(&head.name) == ctx.trunk.as_bytes() {
@@ -448,7 +468,7 @@ fn decide(
             "merged then reverted or modified upstream",
         ));
     }
-    if let Some((pid, commit)) = squash_hit(ctx.repo, base, ctx.trunk_sha, &head.sha)? {
+    if let Some((pid, commit)) = squash_hit(ctx.repo, base, ctx.trunk_sha, &head.sha, patches)? {
         if noop {
             return Ok(drop_of(
                 "squash-equal",
@@ -504,6 +524,7 @@ fn join_list(items: &[String]) -> String {
 fn render(
     repo: &Path,
     trunk: &str,
+    remote: &str,
     trunk_sha: &str,
     snap: &str,
     rows: &[Row],
@@ -511,13 +532,15 @@ fn render(
     let repo = repo
         .to_str()
         .ok_or_else(|| "repo path is not utf-8".to_string())?;
-    if repo.contains(['\n', '\r']) || trunk.contains(['\n', '\r']) {
-        return Err("repo path or trunk contains a newline".into());
+    if repo.contains(['\n', '\r']) || trunk.contains(['\n', '\r']) || remote.contains(['\n', '\r'])
+    {
+        return Err("repo path, trunk, or remote contains a newline".into());
     }
     let mut buf = String::new();
     buf.push_str("#+title: kitline triage\n");
     buf.push_str(&format!("#+repo: {}\n", escape_cell(repo.as_bytes())));
     buf.push_str(&format!("#+trunk: {}\n", escape_cell(trunk.as_bytes())));
+    buf.push_str(&format!("#+remote: {}\n", escape_cell(remote.as_bytes())));
     buf.push_str(&format!("#+trunk_sha: {trunk_sha}\n"));
     buf.push_str(&format!("#+snapshot: {snap}\n"));
     buf.push_str(&format!("#+version: {}\n", env!("CARGO_PKG_VERSION")));
@@ -609,9 +632,10 @@ fn data_row(row: &Row) -> String {
     s
 }
 
-fn parse_drops(text: &str) -> Result<(PathBuf, String, Vec<DropRow>), String> {
+fn parse_drops(text: &str) -> Result<(PathBuf, String, String, Vec<DropRow>), String> {
     let mut repo = String::new();
     let mut trunk = String::new();
+    let mut remote = String::from("origin");
     let mut section = String::new();
     let mut header: Vec<String> = Vec::new();
     let mut drops = Vec::new();
@@ -624,6 +648,7 @@ fn parse_drops(text: &str) -> Result<(PathBuf, String, Vec<DropRow>), String> {
                 match key {
                     "repo" => repo = header_text(value)?,
                     "trunk" => trunk = header_text(value)?,
+                    "remote" => remote = header_text(value)?,
                     _ => {}
                 }
             }
@@ -671,7 +696,7 @@ fn parse_drops(text: &str) -> Result<(PathBuf, String, Vec<DropRow>), String> {
     if repo.is_empty() || trunk.is_empty() {
         return Err("plan is missing repo or trunk".into());
     }
-    Ok((PathBuf::from(repo), trunk, drops))
+    Ok((PathBuf::from(repo), trunk, remote, drops))
 }
 
 fn cells(line: &str) -> Vec<String> {
@@ -858,11 +883,25 @@ fn selected_heads(
     include: &[String],
     exclude: &[String],
 ) -> Result<Vec<Head>, String> {
+    let mut heads = list_heads(repo, "refs/heads", trunk, include, exclude)?;
+    heads.extend(list_heads(repo, "refs/remotes", trunk, include, exclude)?);
+    heads.sort_by(|a, b| a.name.cmp(&b.name));
+    heads.dedup_by(|a, b| a.name == b.name);
+    Ok(heads)
+}
+
+fn list_heads(
+    repo: &Path,
+    prefix: &str,
+    trunk: &str,
+    include: &[String],
+    exclude: &[String],
+) -> Result<Vec<Head>, String> {
     let args = [
         OsStr::new("for-each-ref"),
         OsStr::new("--format=%(objectname)%00%(refname)"),
         OsStr::new("--end-of-options"),
-        OsStr::new("refs/heads"),
+        OsStr::new(prefix),
     ];
     let out = gitutil::git_raw(repo, &args);
     if out.status != 0 {
@@ -873,34 +912,49 @@ fn selected_heads(
         stdout.pop();
     }
     let mut heads = Vec::new();
-    if !stdout.is_empty() {
-        for line in stdout.split(|b| *b == b'\n') {
-            if line.is_empty() {
-                continue;
-            }
-            let Some(nul) = line.iter().position(|b| *b == 0) else {
-                return Err("head line is not a sha and a ref".into());
-            };
-            let (sha, name) = (&line[..nul], &line[nul + 1..]);
-            if !name.starts_with(b"refs/heads/") {
-                continue;
-            }
-            if sha.len() != 40 || !sha.iter().all(u8::is_ascii_hexdigit) {
-                return Err(format!("head {} is not a commit sha", escape_cell(name)));
-            }
-            if !wanted(short_of(name), trunk, include, exclude) {
-                continue;
-            }
-            let sha = std::str::from_utf8(sha)
-                .map_err(|_| format!("head {} is not a commit sha", escape_cell(name)))?;
-            heads.push(Head {
-                name: name.to_vec(),
-                sha: sha.to_string(),
-            });
-        }
+    if stdout.is_empty() {
+        return Ok(heads);
     }
-    heads.sort_by(|a, b| a.name.cmp(&b.name));
+    let prefix_bytes = prefix.as_bytes();
+    for line in stdout.split(|b| *b == b'\n') {
+        if line.is_empty() {
+            continue;
+        }
+        let Some(nul) = line.iter().position(|b| *b == 0) else {
+            return Err("head line is not a sha and a ref".into());
+        };
+        let (sha, name) = (&line[..nul], &line[nul + 1..]);
+        if !name.starts_with(prefix_bytes) {
+            continue;
+        }
+        if remote_head_symref(name) {
+            continue;
+        }
+        if sha.len() != 40 || !sha.iter().all(u8::is_ascii_hexdigit) {
+            return Err(format!("head {} is not a commit sha", escape_cell(name)));
+        }
+        if !wanted(short_of(name), trunk, include, exclude) {
+            continue;
+        }
+        let sha = std::str::from_utf8(sha)
+            .map_err(|_| format!("head {} is not a commit sha", escape_cell(name)))?;
+        heads.push(Head {
+            name: name.to_vec(),
+            sha: sha.to_string(),
+        });
+    }
     Ok(heads)
+}
+
+/// `refs/remotes/<remote>/HEAD` is the symref, not a branch named HEAD.
+fn remote_head_symref(name: &[u8]) -> bool {
+    let Some(rest) = name.strip_prefix(b"refs/remotes/") else {
+        return false;
+    };
+    let Some(slash) = rest.iter().position(|b| *b == b'/') else {
+        return false;
+    };
+    &rest[slash + 1..] == b"HEAD"
 }
 
 fn wanted(name: &[u8], trunk: &str, include: &[String], exclude: &[String]) -> bool {
@@ -923,7 +977,15 @@ fn name_ok(name: &[u8]) -> bool {
 }
 
 fn short_of(name: &[u8]) -> &[u8] {
-    name.strip_prefix(b"refs/heads/").unwrap_or(name)
+    if let Some(rest) = name.strip_prefix(b"refs/heads/") {
+        return rest;
+    }
+    if let Some(rest) = name.strip_prefix(b"refs/remotes/") {
+        if let Some(slash) = rest.iter().position(|b| *b == b'/') {
+            return &rest[slash + 1..];
+        }
+    }
+    name
 }
 
 fn head_ref(name: &[u8]) -> Vec<u8> {
@@ -1073,6 +1135,7 @@ fn squash_hit(
     base: &str,
     trunk: &str,
     branch: &str,
+    patches: &mut PatchCache,
 ) -> Result<Option<(String, String)>, String> {
     let Some(want) = patch_id(repo, base, branch)? else {
         return Ok(None);
@@ -1087,23 +1150,35 @@ fn squash_hit(
         ],
     )?;
     for commit in listed.lines().filter(|l| !l.is_empty()) {
-        let parent = match git_ok(
-            repo,
-            &[
-                "rev-parse",
-                "--verify",
-                "--end-of-options",
-                &format!("{commit}^"),
-            ],
-        ) {
-            Ok(parent) => parent,
-            Err(_) => continue,
-        };
-        if patch_id(repo, &parent, commit)? == Some(want.clone()) {
+        if commit_patch(repo, commit, patches)? == Some(want.clone()) {
             return Ok(Some((want, commit.to_string())));
         }
     }
     Ok(None)
+}
+
+fn commit_patch(
+    repo: &Path,
+    commit: &str,
+    patches: &mut PatchCache,
+) -> Result<Option<String>, String> {
+    if let Some(id) = patches.get(commit) {
+        return Ok(id.clone());
+    }
+    let id = match git_ok(
+        repo,
+        &[
+            "rev-parse",
+            "--verify",
+            "--end-of-options",
+            &format!("{commit}^"),
+        ],
+    ) {
+        Ok(parent) => patch_id(repo, &parent, commit)?,
+        Err(_) => None,
+    };
+    patches.insert(commit.to_string(), id.clone());
+    Ok(id)
 }
 
 fn patch_id(repo: &Path, from: &str, to: &str) -> Result<Option<String>, String> {
@@ -1210,7 +1285,62 @@ fn clone_bare(src: &Path, dst: &Path) -> Result<(), String> {
     if out.status != 0 {
         return Err(format!("clone: {}", out.stderr.trim()));
     }
+    copy_remotes(Path::new(src), Path::new(dst))
+}
+
+/// A bare clone drops `refs/remotes`. Copy them into the private store
+/// when the source is an ordinary checkout.
+fn copy_remotes(src: &Path, dst: &Path) -> Result<(), String> {
+    let listed = gitutil::git(
+        src,
+        &["for-each-ref", "--format=%(refname)", "refs/remotes"],
+    );
+    if listed.status != 0 || listed.stdout.trim().is_empty() {
+        return Ok(());
+    }
+    let src = src
+        .to_str()
+        .ok_or_else(|| "repo path is not utf-8".to_string())?;
+    let out = gitutil::git(
+        dst,
+        &[
+            "fetch",
+            "--no-tags",
+            "--no-write-fetch-head",
+            "--",
+            src,
+            "+refs/remotes/*:refs/remotes/*",
+        ],
+    );
+    if out.status != 0 {
+        return Err(format!("fetch remotes: {}", out.stderr.trim()));
+    }
     Ok(())
+}
+
+fn trunk_tip(repo: &Path, trunk: &str, remote: &str) -> Result<String, String> {
+    let local = format!("refs/heads/{trunk}");
+    if let Some(sha) = verify_ref(repo, &local) {
+        return Ok(sha);
+    }
+    let via = format!("refs/remotes/{remote}/{trunk}");
+    if let Some(sha) = verify_ref(repo, &via) {
+        return Ok(sha);
+    }
+    Err(format!("trunk {trunk} is not a head"))
+}
+
+fn verify_ref(repo: &Path, spec: &str) -> Option<String> {
+    let out = gitutil::git(repo, &["rev-parse", "--verify", "--end-of-options", spec]);
+    if out.status != 0 {
+        return None;
+    }
+    let sha = out.stdout.trim();
+    if sha.len() == 40 && sha.chars().all(|c| c.is_ascii_hexdigit()) {
+        Some(sha.to_string())
+    } else {
+        None
+    }
 }
 
 fn scratch_dir() -> Result<Scratch, String> {
@@ -1329,4 +1459,384 @@ fn hex(bytes: &[u8]) -> String {
         out.push(H[(b & 0xf) as usize] as char);
     }
     out
+}
+
+struct Land {
+    text: String,
+    lines: Vec<String>,
+    stacks: usize,
+    order: usize,
+}
+
+fn land_candidate(row: &Row) -> bool {
+    matches!(row.bucket, Bucket::Rest | Bucket::Rebase)
+        && (row.grade == "open" || row.grade == "partial")
+}
+
+fn land_verb(row: &Row) -> &'static str {
+    if row.grade == "open" && row.applies == "yes" && row.bucket == Bucket::Rest {
+        "land"
+    } else {
+        "rebase"
+    }
+}
+
+/// Parents first. Graphite's `gt log short` lists the tip first; this list
+/// is that sequence reversed, the same direction as the parent-before-child
+/// tree `git machete discover` prints.
+fn land_plan(repo: &Path, rows: &[Row]) -> Result<Land, String> {
+    let cands: Vec<usize> = rows
+        .iter()
+        .enumerate()
+        .filter(|(_, row)| land_candidate(row))
+        .map(|(i, _)| i)
+        .collect();
+    if cands.is_empty() {
+        return Ok(Land {
+            text: "#+stacks: 0\n#+order: 0\n\n* STACKS\n\n* ORDER\n\n".into(),
+            lines: Vec::new(),
+            stacks: 0,
+            order: 0,
+        });
+    }
+    let mut shas: Vec<String> = cands.iter().map(|&i| rows[i].sha.clone()).collect();
+    shas.sort();
+    shas.dedup();
+    let parents = parent_map(repo, &shas)?;
+    let mut at: HashMap<String, Vec<usize>> = HashMap::new();
+    for (local, &row_i) in cands.iter().enumerate() {
+        at.entry(rows[row_i].sha.clone()).or_default().push(local);
+    }
+    let mut memo: HashMap<String, HashSet<usize>> = HashMap::new();
+    let mut under = Vec::with_capacity(cands.len());
+    for local in 0..cands.len() {
+        let mut set = tips_under(&rows[cands[local]].sha, &parents, &at, &mut memo);
+        set.remove(&local);
+        under.push(set);
+    }
+    let mut imm = immediate(&under);
+    // Land before rebase, then oldest. A parent stays ahead of its child
+    // because the child is not ready until the parent has been listed.
+    let keys: Vec<(u8, i64, Vec<u8>)> = cands
+        .iter()
+        .map(|&i| {
+            let rank = if land_verb(&rows[i]) == "land" { 0 } else { 1 };
+            (rank, rows[i].author_new_epoch, rows[i].branch.clone())
+        })
+        .collect();
+    for group in &mut imm {
+        group.sort_by(|&a, &b| keys[a].cmp(&keys[b]).then(a.cmp(&b)));
+        group.dedup();
+    }
+    let order = topo(&imm, &keys);
+    let number = numbers(&order, cands.len());
+    let lines = order
+        .iter()
+        .map(|&local| {
+            step_text(
+                number[local],
+                &rows[cands[local]],
+                &imm[local],
+                rows,
+                &cands,
+            )
+        })
+        .collect::<Vec<_>>();
+    let (tree, stacks) = stack_tree(rows, &cands, &imm, &order, &number);
+    let mut text = String::new();
+    text.push_str(&format!("#+stacks: {stacks}\n"));
+    text.push_str(&format!("#+order: {}\n\n", lines.len()));
+    text.push_str("* STACKS\n\n");
+    text.push_str(&tree);
+    if !tree.ends_with('\n') {
+        text.push('\n');
+    }
+    text.push('\n');
+    text.push_str("* ORDER\n\n");
+    for line in &lines {
+        text.push_str(line);
+        text.push('\n');
+    }
+    text.push('\n');
+    Ok(Land {
+        text,
+        order: lines.len(),
+        stacks,
+        lines,
+    })
+}
+
+fn step_text(n: usize, row: &Row, parents: &[usize], rows: &[Row], cands: &[usize]) -> String {
+    let also = if parents.len() < 2 {
+        String::new()
+    } else {
+        let rest = parents[1..]
+            .iter()
+            .map(|&p| escape_cell(&rows[cands[p]].branch))
+            .collect::<Vec<_>>()
+            .join(" ");
+        format!(" also {rest}")
+    };
+    format!("{n}. {} {}{also}", land_verb(row), escape_cell(&row.branch))
+}
+
+fn parent_map(repo: &Path, shas: &[String]) -> Result<HashMap<String, Vec<String>>, String> {
+    let mut map = HashMap::new();
+    for chunk in shas.chunks(400) {
+        let mut args = vec!["rev-list", "--parents", "--end-of-options"];
+        for sha in chunk {
+            args.push(sha.as_str());
+        }
+        let text = git_ok(repo, &args)?;
+        for line in text.lines() {
+            let mut parts = line.split_whitespace();
+            let Some(sha) = parts.next() else {
+                continue;
+            };
+            if sha.len() != 40 {
+                continue;
+            }
+            let ps = parts
+                .filter(|p| p.len() == 40)
+                .map(str::to_string)
+                .collect();
+            map.entry(sha.to_string()).or_insert(ps);
+        }
+    }
+    Ok(map)
+}
+
+fn tips_under(
+    start: &str,
+    parents: &HashMap<String, Vec<String>>,
+    at: &HashMap<String, Vec<usize>>,
+    memo: &mut HashMap<String, HashSet<usize>>,
+) -> HashSet<usize> {
+    if let Some(got) = memo.get(start) {
+        return got.clone();
+    }
+    let mut color: HashMap<String, u8> = HashMap::new();
+    let mut stack = vec![start.to_string()];
+    while let Some(sha) = stack.last().cloned() {
+        if memo.contains_key(&sha) {
+            stack.pop();
+            continue;
+        }
+        if color.get(&sha).copied().unwrap_or(0) == 0 {
+            color.insert(sha.clone(), 1);
+            if let Some(ps) = parents.get(&sha) {
+                for parent in ps {
+                    if !memo.contains_key(parent) && color.get(parent).copied().unwrap_or(0) == 0 {
+                        stack.push(parent.clone());
+                    }
+                }
+            }
+            continue;
+        }
+        let mut set = HashSet::new();
+        if let Some(ps) = parents.get(&sha) {
+            for parent in ps {
+                if let Some(tips) = at.get(parent) {
+                    set.extend(tips.iter().copied());
+                }
+                if let Some(below) = memo.get(parent) {
+                    set.extend(below.iter().copied());
+                }
+            }
+        }
+        memo.insert(sha, set);
+        stack.pop();
+    }
+    memo.get(start).cloned().unwrap_or_default()
+}
+
+fn immediate(under: &[HashSet<usize>]) -> Vec<Vec<usize>> {
+    let mut imm = vec![Vec::new(); under.len()];
+    for (i, below) in under.iter().enumerate() {
+        for &j in below {
+            let nested = below.iter().any(|&k| k != j && under[k].contains(&j));
+            if !nested {
+                imm[i].push(j);
+            }
+        }
+    }
+    imm
+}
+
+fn topo(imm: &[Vec<usize>], keys: &[(u8, i64, Vec<u8>)]) -> Vec<usize> {
+    let n = imm.len();
+    let mut indeg = vec![0usize; n];
+    let mut children = vec![Vec::new(); n];
+    for (child, ps) in imm.iter().enumerate() {
+        indeg[child] = ps.len();
+        for &parent in ps {
+            children[parent].push(child);
+        }
+    }
+    let key = |i: usize| (keys[i].0, keys[i].1, keys[i].2.clone(), i);
+    let mut ready: BTreeSet<(u8, i64, Vec<u8>, usize)> = BTreeSet::new();
+    for i in 0..n {
+        if indeg[i] == 0 {
+            ready.insert(key(i));
+        }
+    }
+    let mut order = Vec::with_capacity(n);
+    while let Some(item) = ready.pop_first() {
+        let i = item.3;
+        order.push(i);
+        for &child in &children[i] {
+            indeg[child] -= 1;
+            if indeg[child] == 0 {
+                ready.insert(key(child));
+            }
+        }
+    }
+    if order.len() != n {
+        let mut left: Vec<usize> = (0..n).filter(|i| !order.contains(i)).collect();
+        left.sort_by_key(|&i| key(i));
+        order.extend(left);
+    }
+    order
+}
+
+fn numbers(order: &[usize], n: usize) -> Vec<usize> {
+    let mut number = vec![0usize; n];
+    for (i, &local) in order.iter().enumerate() {
+        number[local] = i + 1;
+    }
+    number
+}
+
+fn stack_tree(
+    rows: &[Row],
+    cands: &[usize],
+    imm: &[Vec<usize>],
+    order: &[usize],
+    number: &[usize],
+) -> (String, usize) {
+    let n = cands.len();
+    let mut children = vec![Vec::new(); n];
+    for (child, ps) in imm.iter().enumerate() {
+        if let Some(&first) = ps.first() {
+            children[first].push(child);
+        }
+    }
+    for kids in &mut children {
+        kids.sort_by_key(|&child| number[child]);
+        kids.dedup();
+    }
+    let mut buf = String::new();
+    let mut printed = HashSet::new();
+    let mut stacks = 0usize;
+    let mut roots: Vec<usize> = (0..n).filter(|&i| imm[i].is_empty()).collect();
+    roots.sort_by_key(|&i| number[i]);
+    for root in roots {
+        emit_stack(
+            root,
+            0,
+            rows,
+            cands,
+            imm,
+            &children,
+            number,
+            &mut printed,
+            &mut buf,
+            &mut stacks,
+        );
+    }
+    for &local in order {
+        if !printed.contains(&local) {
+            emit_stack(
+                local,
+                0,
+                rows,
+                cands,
+                imm,
+                &children,
+                number,
+                &mut printed,
+                &mut buf,
+                &mut stacks,
+            );
+        }
+    }
+    (buf, stacks)
+}
+
+fn emit_stack(
+    local: usize,
+    depth: usize,
+    rows: &[Row],
+    cands: &[usize],
+    imm: &[Vec<usize>],
+    children: &[Vec<usize>],
+    number: &[usize],
+    printed: &mut HashSet<usize>,
+    buf: &mut String,
+    stacks: &mut usize,
+) {
+    if !printed.insert(local) {
+        return;
+    }
+    if depth == 0 {
+        *stacks += 1;
+    }
+    let text = step_text(number[local], &rows[cands[local]], &imm[local], rows, cands);
+    buf.push_str(&"  ".repeat(depth));
+    buf.push_str("- ");
+    buf.push_str(&text);
+    buf.push('\n');
+    for &child in &children[local] {
+        emit_stack(
+            child,
+            depth + 1,
+            rows,
+            cands,
+            imm,
+            children,
+            number,
+            printed,
+            buf,
+            stacks,
+        );
+    }
+}
+
+#[cfg(test)]
+mod order_tests {
+    use super::*;
+
+    fn keys(epochs: &[i64]) -> Vec<(u8, i64, Vec<u8>)> {
+        epochs
+            .iter()
+            .enumerate()
+            .map(|(i, epoch)| (0, *epoch, vec![b'a' + i as u8]))
+            .collect()
+    }
+
+    #[test]
+    fn chain_lands_base_first() {
+        let under = vec![HashSet::new(), HashSet::from([0]), HashSet::from([0, 1])];
+        let imm = immediate(&under);
+        assert_eq!(imm[2], vec![1]);
+        assert_eq!(topo(&imm, &keys(&[1, 2, 3])), vec![0, 1, 2]);
+    }
+
+    #[test]
+    fn fork_orders_children_by_age() {
+        let under = vec![HashSet::new(), HashSet::from([0]), HashSet::from([0])];
+        let imm = immediate(&under);
+        assert_eq!(topo(&imm, &keys(&[1, 3, 2])), vec![0, 2, 1]);
+    }
+
+    #[test]
+    fn two_parents_both_precede_the_child() {
+        let under = vec![HashSet::new(), HashSet::new(), HashSet::from([0, 1])];
+        let imm = immediate(&under);
+        assert_eq!(imm[2].len(), 2);
+        let order = topo(&imm, &keys(&[2, 1, 3]));
+        assert_eq!(order.last().copied(), Some(2));
+        assert!(order.iter().position(|i| *i == 0).unwrap() < 2);
+        assert!(order.iter().position(|i| *i == 1).unwrap() < 2);
+    }
 }

@@ -9,7 +9,7 @@ version = "0.1.0"
 edition = "2021"
 rust-version = "1.89"
 license = "MIT"
-description = "Plan a kit landing from a workspace file"
+description = "Grade branches and write a landing order"
 authors = ["Rohit Goswami <rgoswami@ieee.org>"]
 publish = false
 
@@ -19,6 +19,7 @@ path = "src/main.rs"
 
 [dependencies]
 clap = { version = "4.5", features = ["derive"] }
+kitline-core = { path = "crates/kitline-core" }
 serde = { version = "1", features = ["derive"] }
 sha2 = "0.10.9"
 toml = "0.8"

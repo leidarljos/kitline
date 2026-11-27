@@ -543,6 +543,7 @@ name = "kitline"
 version = "0.1.0"
 dependencies = [
  "clap",
+ "kitline-core",
  "serde",
  "sha2",
  "toml",
