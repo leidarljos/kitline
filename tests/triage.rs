@@ -1,5 +1,7 @@
 use std::collections::BTreeMap;
+use std::ffi::OsStr;
 use std::fs;
+use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -44,7 +46,27 @@ fn fixture(root: &Path) -> PathBuf {
 }
 
 fn cells(line: &str) -> Vec<String> {
-    let mut out: Vec<String> = line.split('|').map(|s| s.trim().to_string()).collect();
+    let bytes = line.as_bytes();
+    let mut out = Vec::new();
+    let mut cur = Vec::new();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'\\' && i + 1 < bytes.len() {
+            cur.push(b'\\');
+            cur.push(bytes[i + 1]);
+            i += 2;
+            continue;
+        }
+        if bytes[i] == b'|' {
+            out.push(trim_pad(&cur));
+            cur.clear();
+            i += 1;
+            continue;
+        }
+        cur.push(bytes[i]);
+        i += 1;
+    }
+    out.push(trim_pad(&cur));
     if out.first().is_some_and(String::is_empty) {
         out.remove(0);
     }
@@ -52,6 +74,172 @@ fn cells(line: &str) -> Vec<String> {
         out.pop();
     }
     out
+}
+
+fn trim_pad(raw: &[u8]) -> String {
+    let mut start = 0;
+    let mut end = raw.len();
+    while start < end && (raw[start] == b' ' || raw[start] == b'\t') {
+        start += 1;
+    }
+    while end > start && (raw[end - 1] == b' ' || raw[end - 1] == b'\t') {
+        end -= 1;
+    }
+    std::str::from_utf8(&raw[start..end])
+        .map(str::to_string)
+        .unwrap_or_default()
+}
+
+fn cell_text(cell: &str) -> String {
+    let raw = unescape_cell(cell);
+    match String::from_utf8(raw) {
+        Ok(text) => text,
+        Err(err) => escape_cell(&err.into_bytes()),
+    }
+}
+
+fn unescape_cell(cell: &str) -> Vec<u8> {
+    let b = cell.as_bytes();
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] != b'\\' {
+            out.push(b[i]);
+            i += 1;
+            continue;
+        }
+        assert!(i + 1 < b.len(), "truncated escape");
+        i += 1;
+        match b[i] {
+            b'\\' => out.push(b'\\'),
+            b'|' => out.push(b'|'),
+            b'n' => out.push(b'\n'),
+            b'r' => out.push(b'\r'),
+            b't' => out.push(b'\t'),
+            b'0'..=b'7' => {
+                assert!(i + 2 < b.len(), "truncated octal");
+                let digits = &b[i..i + 3];
+                assert!(
+                    digits.iter().all(|d| (b'0'..=b'7').contains(d)),
+                    "bad octal"
+                );
+                let val = u16::from(digits[0] - b'0') * 64
+                    + u16::from(digits[1] - b'0') * 8
+                    + u16::from(digits[2] - b'0');
+                assert!(val <= 255, "octal out of range");
+                out.push(val as u8);
+                i += 2;
+            }
+            other => panic!("unknown escape {other}"),
+        }
+        i += 1;
+    }
+    out
+}
+
+fn escape_cell(raw: &[u8]) -> String {
+    let mut out = String::with_capacity(raw.len());
+    let mut i = 0;
+    while i < raw.len() {
+        match raw[i] {
+            b'\\' => {
+                out.push_str("\\\\");
+                i += 1;
+            }
+            b'|' => {
+                out.push_str("\\|");
+                i += 1;
+            }
+            b'\n' => {
+                out.push_str("\\n");
+                i += 1;
+            }
+            b'\r' => {
+                out.push_str("\\r");
+                i += 1;
+            }
+            b'\t' => {
+                out.push_str("\\t");
+                i += 1;
+            }
+            b if b < 0x20 || b == 0x7f => {
+                push_octal(&mut out, b);
+                i += 1;
+            }
+            b if b < 0x80 => {
+                out.push(b as char);
+                i += 1;
+            }
+            _ => {
+                let width = utf8_len(raw[i]);
+                if width > 1
+                    && i + width <= raw.len()
+                    && std::str::from_utf8(&raw[i..i + width]).is_ok()
+                {
+                    out.push_str(std::str::from_utf8(&raw[i..i + width]).unwrap());
+                    i += width;
+                } else {
+                    push_octal(&mut out, raw[i]);
+                    i += 1;
+                }
+            }
+        }
+    }
+    out
+}
+
+fn push_octal(out: &mut String, b: u8) {
+    out.push('\\');
+    out.push(char::from(b'0' + (b >> 6)));
+    out.push(char::from(b'0' + ((b >> 3) & 7)));
+    out.push(char::from(b'0' + (b & 7)));
+}
+
+fn utf8_len(b: u8) -> usize {
+    match b {
+        0xC2..=0xDF => 2,
+        0xE0..=0xEF => 3,
+        0xF0..=0xF4 => 4,
+        _ => 0,
+    }
+}
+
+fn git_raw(dir: &Path, args: &[&[u8]]) -> Vec<u8> {
+    let os: Vec<&OsStr> = args.iter().map(|a| OsStr::from_bytes(a)).collect();
+    let out = Command::new("git")
+        .args(os)
+        .current_dir(dir)
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{args:?} {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    out.stdout
+}
+
+fn move_drop(repo: &Path, name: &[u8]) {
+    git_raw(repo, &[b"checkout", b"-q", b"--detach", name]);
+    fs::write(repo.join("moved.txt"), b"moved\n").unwrap();
+    git_raw(repo, &[b"add", b"moved.txt"]);
+    git_raw(repo, &[b"commit", b"-qm", b"move the drop head"]);
+    let tip = fs::read_to_string(repo.join(".git/HEAD")).unwrap();
+    let tip = tip.trim().as_bytes().to_vec();
+    assert_eq!(tip.len(), 40, "{}", String::from_utf8_lossy(&tip));
+    git_raw(repo, &[b"update-ref", name, &tip]);
+}
+
+fn verify_names(plan: &Path, needle: &str) {
+    let again = Command::new(env!("CARGO_BIN_EXE_kitline"))
+        .args(["triage", "verify", plan.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert_ne!(again.status.code(), Some(0));
+    let err = String::from_utf8_lossy(&again.stderr);
+    assert!(err.contains(needle), "{err}");
 }
 
 fn dash(cell: &str) -> bool {
@@ -89,6 +277,7 @@ fn parse(text: &str) -> Plan {
         if got.is_empty() || got.iter().all(|c| dash(c)) {
             continue;
         }
+        let got: Vec<String> = got.iter().map(|c| cell_text(c)).collect();
         if cols.is_empty() {
             cols = got;
             continue;
@@ -142,8 +331,17 @@ fn label(short: &str) -> (String, String) {
     if short == "grade/open/space" {
         return ("open".into(), "rebase".into());
     }
+    if short.ends_with('\u{00a0}') {
+        return ("ancestor".into(), "drop".into());
+    }
     if short.chars().any(|c| c == '\u{00a0}') {
         return ("open".into(), "rest".into());
+    }
+    if short.contains('|') {
+        return ("open".into(), "rest".into());
+    }
+    if short.contains('\\') {
+        return ("ancestor".into(), "drop".into());
     }
     let mut parts = short.split('/');
     assert_eq!(parts.next(), Some("grade"), "{short}");
@@ -320,15 +518,52 @@ fn p21_fixture_grades_match_labels() {
     assert!(plan.rows.keys().any(|k| k.contains('\u{00a0}')));
     assert!(plan.rows.contains_key("refs/heads/--output=x"));
     assert!(plan.rows.contains_key("refs/heads/HEAD"));
-
-    let listed = git(
-        &repo,
-        &["for-each-ref", "--format=%(refname)", "refs/heads"],
+    let trail = format!("refs/heads/trail{}", '\u{00a0}');
+    assert_eq!(
+        plan.section.get(&trail).map(String::as_str),
+        Some("DROP"),
+        "{trail:?}"
     );
-    let mut names: Vec<&str> = listed.lines().collect();
-    names.sort_unstable();
-    let mut planned: Vec<&str> = plan.rows.keys().map(String::as_str).collect();
-    planned.sort_unstable();
+    assert_eq!(
+        plan.rows
+            .get(&trail)
+            .unwrap()
+            .get("grade")
+            .map(String::as_str),
+        Some("ancestor")
+    );
+    assert_eq!(
+        plan.section.get("refs/heads/foo|bar").map(String::as_str),
+        Some("REST")
+    );
+    assert_eq!(
+        plan.rows
+            .get("refs/heads/foo|bar")
+            .unwrap()
+            .get("grade")
+            .map(String::as_str),
+        Some("open")
+    );
+    let bad = "refs/heads/bad\\377name";
+    assert_eq!(plan.section.get(bad).map(String::as_str), Some("DROP"));
+    assert_eq!(
+        plan.rows.get(bad).unwrap().get("grade").map(String::as_str),
+        Some("ancestor")
+    );
+    assert_eq!(unescape_cell(bad), b"refs/heads/bad\xffname");
+
+    let listed = git_raw(
+        &repo,
+        &[b"for-each-ref", b"--format=%(refname)", b"refs/heads"],
+    );
+    let mut names: Vec<Vec<u8>> = listed
+        .split(|b| *b == b'\n')
+        .filter(|l| !l.is_empty())
+        .map(|l| l.to_vec())
+        .collect();
+    names.sort();
+    let mut planned: Vec<Vec<u8>> = plan.rows.keys().map(|k| unescape_cell(k)).collect();
+    planned.sort();
     assert_eq!(planned, names);
     for key in ["keep", "drop", "rebase", "rest", "unsorted"] {
         let n = seen
@@ -372,6 +607,34 @@ fn p22_verify_fails_after_drop_moves() {
         plan.section.get("refs/heads/v1").map(String::as_str),
         Some("DROP")
     );
+    let trail = format!("refs/heads/trail{}", '\u{00a0}');
+    assert_eq!(plan.section.get(&trail).map(String::as_str), Some("DROP"));
+    let bad = "refs/heads/bad\\377name";
+    assert_eq!(plan.section.get(bad).map(String::as_str), Some("DROP"));
+    move_drop(&repo, trail.as_bytes());
+    verify_names(&plan_path, &trail);
+    let trail_sha = plan
+        .rows
+        .get(&trail)
+        .unwrap()
+        .get("sha")
+        .unwrap()
+        .as_bytes()
+        .to_vec();
+    git_raw(&repo, &[b"update-ref", trail.as_bytes(), &trail_sha]);
+    git_raw(&repo, &[b"checkout", b"-qf", b"main"]);
+    move_drop(&repo, b"refs/heads/bad\xffname");
+    verify_names(&plan_path, bad);
+    let bad_sha = plan
+        .rows
+        .get(bad)
+        .unwrap()
+        .get("sha")
+        .unwrap()
+        .as_bytes()
+        .to_vec();
+    git_raw(&repo, &[b"update-ref", b"refs/heads/bad\xffname", &bad_sha]);
+    git_raw(&repo, &[b"checkout", b"-qf", b"main"]);
     let tag = git(&repo, &["rev-parse", "refs/tags/v1"]);
     // checkout of the full ref detaches, so point the branch at the new commit.
     git(&repo, &["checkout", "-q", "--detach", "refs/heads/v1"]);

@@ -120,6 +120,20 @@ git update-ref "refs/heads/${nbsp}" HEAD
 git checkout -q main
 git branch -D tmp-nbsp
 
+# Trailing U+00A0. Ancestor of trunk, so the row is DROP.
+git update-ref "$(printf 'refs/heads/trail\302\240')" "$fork"
+
+# A byte that is not UTF-8. Ancestor of trunk, so the row is DROP.
+git update-ref "$(printf 'refs/heads/bad\377name')" "$fork"
+
+# A bar in the name. Unique work, so the row is open / rest.
+git checkout -q -b tmp-bar "$fork"
+printf 'bar\n' > bar.txt
+cmt 2020-03-05T00:00:00Z bar-unique
+git update-ref 'refs/heads/foo|bar' HEAD
+git checkout -q main
+git branch -D tmp-bar
+
 # Author instants whose %aI text order is not epoch order.
 # Label: open / rest. Named dates so it does not sit under grade/open/rest.
 git checkout -q -b grade/open/dates "$fork"

@@ -1,3 +1,4 @@
+use std::ffi::OsStr;
 use std::path::Path;
 use std::process::Command;
 
@@ -7,10 +8,15 @@ pub struct GitOut {
     pub stderr: String,
 }
 
-pub fn git(dir: &Path, args: &[&str]) -> GitOut {
-    let out = Command::new("git")
-        .arg("--no-pager")
-        .args(args)
+pub struct GitRaw {
+    pub status: i32,
+    pub stdout: Vec<u8>,
+    pub stderr: Vec<u8>,
+}
+
+fn git_cmd(dir: &Path) -> Command {
+    let mut cmd = Command::new("git");
+    cmd.arg("--no-pager")
         .current_dir(dir)
         .env("GIT_CONFIG_GLOBAL", "/dev/null")
         .env("GIT_CONFIG_SYSTEM", "/dev/null")
@@ -22,19 +28,32 @@ pub fn git(dir: &Path, args: &[&str]) -> GitOut {
         .env("GIT_TERMINAL_PROMPT", "0")
         .env_remove("GIT_DIR")
         .env_remove("GIT_WORK_TREE")
-        .env_remove("GIT_INDEX_FILE")
-        .output();
-    match out {
-        Ok(out) => GitOut {
+        .env_remove("GIT_INDEX_FILE");
+    cmd
+}
+
+pub fn git_raw(dir: &Path, args: &[&OsStr]) -> GitRaw {
+    match git_cmd(dir).args(args).output() {
+        Ok(out) => GitRaw {
             status: out.status.code().unwrap_or(1),
-            stdout: String::from_utf8_lossy(&out.stdout).to_string(),
-            stderr: String::from_utf8_lossy(&out.stderr).to_string(),
+            stdout: out.stdout,
+            stderr: out.stderr,
         },
-        Err(err) => GitOut {
+        Err(err) => GitRaw {
             status: 1,
-            stdout: String::new(),
-            stderr: err.to_string(),
+            stdout: Vec::new(),
+            stderr: err.to_string().into_bytes(),
         },
+    }
+}
+
+pub fn git(dir: &Path, args: &[&str]) -> GitOut {
+    let os: Vec<&OsStr> = args.iter().copied().map(OsStr::new).collect();
+    let raw = git_raw(dir, &os);
+    GitOut {
+        status: raw.status,
+        stdout: String::from_utf8_lossy(&raw.stdout).into_owned(),
+        stderr: String::from_utf8_lossy(&raw.stderr).into_owned(),
     }
 }
 

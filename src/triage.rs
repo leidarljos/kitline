@@ -10,8 +10,10 @@
 use crate::gitutil;
 use clap::Parser;
 use sha2::{Digest, Sha256};
+use std::ffi::OsStr;
 use std::fs;
 use std::io::Write;
+use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -72,7 +74,7 @@ impl Drop for Scratch {
 }
 
 struct Head {
-    name: String,
+    name: Vec<u8>,
     sha: String,
 }
 
@@ -126,7 +128,7 @@ impl Bucket {
 }
 
 struct Row {
-    branch: String,
+    branch: Vec<u8>,
     sha: String,
     base: String,
     ahead: u64,
@@ -145,7 +147,7 @@ struct Row {
 }
 
 struct DropRow {
-    branch: String,
+    branch: Vec<u8>,
     grade: String,
     check: String,
 }
@@ -201,7 +203,10 @@ fn plan(cli: &TriageCli) -> Result<(), String> {
         ],
     )?;
     let heads = selected_heads(&bare, &cli.trunk, &cli.include, &cli.exclude)?;
-    if !heads.iter().any(|h| short_of(&h.name) == cli.trunk) {
+    if !heads
+        .iter()
+        .any(|h| short_of(&h.name) == cli.trunk.as_bytes())
+    {
         return Err(format!("trunk {} is not a head", cli.trunk));
     }
     let snap = snapshot(&heads);
@@ -214,7 +219,8 @@ fn plan(cli: &TriageCli) -> Result<(), String> {
     let mut rows = Vec::with_capacity(heads.len());
     for head in &heads {
         let short = short_of(&head.name);
-        let kept = short == cli.trunk || cli.keep.iter().any(|pat| glob_match(pat, short));
+        let kept =
+            short == cli.trunk.as_bytes() || cli.keep.iter().any(|pat| glob_match(pat, short));
         rows.push(classify(&ctx, head, kept)?);
     }
     let text = render(&repo, &cli.trunk, &trunk_sha, &snap, &rows)?;
@@ -263,12 +269,12 @@ fn verify(path: &Path) -> Result<(), String> {
     let mut failed = Vec::new();
     for row in &drops {
         if row.grade != row.check || row.check.is_empty() {
-            failed.push(format!("drop does not hold: {}", row.branch));
+            failed.push(format!("drop does not hold: {}", escape_cell(&row.branch)));
             continue;
         }
         let full = head_ref(&row.branch);
         if !branch_exists(&bare, &full)? {
-            failed.push(format!("drop does not hold: {}", row.branch));
+            failed.push(format!("drop does not hold: {}", escape_cell(&row.branch)));
             continue;
         }
         // Re-read the live tip of the full ref. The sha in the plan is only
@@ -276,7 +282,7 @@ fn verify(path: &Path) -> Result<(), String> {
         let live = live_sha(&bare, &full)?;
         let holds = check_holds(&ctx, &live, &row.check)?;
         if !holds {
-            failed.push(format!("drop does not hold: {}", row.branch));
+            failed.push(format!("drop does not hold: {}", escape_cell(&row.branch)));
         }
     }
     if failed.is_empty() {
@@ -311,10 +317,13 @@ fn check_holds(ctx: &Ctx<'_>, sha: &str, check: &str) -> Result<bool, String> {
 fn classify(ctx: &Ctx<'_>, head: &Head, kept: bool) -> Result<Row, String> {
     let short = short_of(&head.name);
     if !name_ok(short) {
-        return Err(format!("branch name {short} cannot be stored in the plan"));
+        return Err(format!(
+            "branch name {} cannot be stored in the plan",
+            escape_cell(short)
+        ));
     }
     let (ahead, behind) = gitutil::ahead_behind(ctx.repo, ctx.trunk_sha, &head.sha)
-        .ok_or_else(|| format!("ahead/behind for {}", head.name))?;
+        .ok_or_else(|| format!("ahead/behind for {}", escape_cell(&head.name)))?;
     let (author_old, author_new, author_new_epoch) =
         author_range(ctx.repo, ctx.trunk_sha, &head.sha)?;
     let Some(base) = merge_base(ctx.repo, ctx.trunk_sha, &head.sha)? else {
@@ -403,7 +412,7 @@ fn decide(
     noop: bool,
 ) -> Result<Decision, String> {
     if kept {
-        let reason = if short_of(&head.name) == ctx.trunk {
+        let reason = if short_of(&head.name) == ctx.trunk.as_bytes() {
             "trunk"
         } else {
             "keep"
@@ -573,33 +582,31 @@ fn separator(n: usize) -> String {
 }
 
 fn data_row(row: &Row) -> String {
+    let ahead = row.ahead.to_string();
+    let behind = row.behind.to_string();
     let cells = [
-        row.branch.as_str(),
-        row.sha.as_str(),
-        row.base.as_str(),
-        &row.ahead.to_string(),
-        &row.behind.to_string(),
-        row.author_old.as_str(),
-        row.author_new.as_str(),
-        row.grade.as_str(),
-        row.check.as_str(),
-        row.evidence.as_str(),
-        row.applies.as_str(),
-        row.conflicts.as_str(),
-        row.dropped.as_str(),
-        row.reason.as_str(),
+        escape_cell(&row.branch),
+        escape_cell(row.sha.as_bytes()),
+        escape_cell(row.base.as_bytes()),
+        escape_cell(ahead.as_bytes()),
+        escape_cell(behind.as_bytes()),
+        escape_cell(row.author_old.as_bytes()),
+        escape_cell(row.author_new.as_bytes()),
+        escape_cell(row.grade.as_bytes()),
+        escape_cell(row.check.as_bytes()),
+        escape_cell(row.evidence.as_bytes()),
+        escape_cell(row.applies.as_bytes()),
+        escape_cell(row.conflicts.as_bytes()),
+        escape_cell(row.dropped.as_bytes()),
+        escape_cell(row.reason.as_bytes()),
     ];
     let mut s = String::from("|");
-    for cell in cells {
+    for cell in &cells {
         s.push(' ');
-        s.push_str(&sanitize(cell));
+        s.push_str(cell);
         s.push_str(" |");
     }
     s
-}
-
-fn sanitize(s: &str) -> String {
-    s.replace(['|', '\n', '\r'], " ")
 }
 
 fn parse_drops(text: &str) -> Result<(PathBuf, String, Vec<DropRow>), String> {
@@ -635,7 +642,7 @@ fn parse_drops(text: &str) -> Result<(PathBuf, String, Vec<DropRow>), String> {
             header = cells;
             continue;
         }
-        let mut branch = String::new();
+        let mut branch = Vec::new();
         let mut grade = String::new();
         let mut check = String::new();
         for (i, cell) in cells.iter().enumerate() {
@@ -643,9 +650,9 @@ fn parse_drops(text: &str) -> Result<(PathBuf, String, Vec<DropRow>), String> {
                 continue;
             };
             match name.as_str() {
-                "branch" => branch = cell.clone(),
-                "grade" => grade = cell.clone(),
-                "check" => check = cell.clone(),
+                "branch" => branch = unescape_cell(cell)?,
+                "grade" => grade = cell_string(cell)?,
+                "check" => check = cell_string(cell)?,
                 _ => {}
             }
         }
@@ -665,7 +672,27 @@ fn parse_drops(text: &str) -> Result<(PathBuf, String, Vec<DropRow>), String> {
 }
 
 fn cells(line: &str) -> Vec<String> {
-    let mut out: Vec<String> = line.split('|').map(|s| s.trim().to_string()).collect();
+    let bytes = line.as_bytes();
+    let mut out = Vec::new();
+    let mut cur = Vec::new();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'\\' && i + 1 < bytes.len() {
+            cur.push(b'\\');
+            cur.push(bytes[i + 1]);
+            i += 2;
+            continue;
+        }
+        if bytes[i] == b'|' {
+            out.push(trim_pad(&cur));
+            cur.clear();
+            i += 1;
+            continue;
+        }
+        cur.push(bytes[i]);
+        i += 1;
+    }
+    out.push(trim_pad(&cur));
     if out.first().is_some_and(String::is_empty) {
         out.remove(0);
     }
@@ -673,6 +700,137 @@ fn cells(line: &str) -> Vec<String> {
         out.pop();
     }
     out
+}
+
+fn trim_pad(raw: &[u8]) -> String {
+    let mut start = 0;
+    let mut end = raw.len();
+    while start < end && (raw[start] == b' ' || raw[start] == b'\t') {
+        start += 1;
+    }
+    while end > start && (raw[end - 1] == b' ' || raw[end - 1] == b'\t') {
+        end -= 1;
+    }
+    match std::str::from_utf8(&raw[start..end]) {
+        Ok(text) => text.to_string(),
+        Err(_) => String::new(),
+    }
+}
+
+fn cell_string(cell: &str) -> Result<String, String> {
+    let raw = unescape_cell(cell)?;
+    String::from_utf8(raw).map_err(|_| "plan cell is not utf-8".to_string())
+}
+
+fn unescape_cell(cell: &str) -> Result<Vec<u8>, String> {
+    let b = cell.as_bytes();
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] != b'\\' {
+            out.push(b[i]);
+            i += 1;
+            continue;
+        }
+        if i + 1 >= b.len() {
+            return Err("truncated escape in plan cell".into());
+        }
+        i += 1;
+        match b[i] {
+            b'\\' => out.push(b'\\'),
+            b'|' => out.push(b'|'),
+            b'n' => out.push(b'\n'),
+            b'r' => out.push(b'\r'),
+            b't' => out.push(b'\t'),
+            b'0'..=b'7' => {
+                if i + 2 >= b.len() {
+                    return Err("truncated octal escape in plan cell".into());
+                }
+                let digits = &b[i..i + 3];
+                if !digits.iter().all(|d| (b'0'..=b'7').contains(d)) {
+                    return Err("bad octal escape in plan cell".into());
+                }
+                let val = u16::from(digits[0] - b'0') * 64
+                    + u16::from(digits[1] - b'0') * 8
+                    + u16::from(digits[2] - b'0');
+                if val > 255 {
+                    return Err("octal escape out of range".into());
+                }
+                out.push(val as u8);
+                i += 2;
+            }
+            _ => return Err("unknown escape in plan cell".into()),
+        }
+        i += 1;
+    }
+    Ok(out)
+}
+
+fn escape_cell(raw: &[u8]) -> String {
+    let mut out = String::with_capacity(raw.len());
+    let mut i = 0;
+    while i < raw.len() {
+        match raw[i] {
+            b'\\' => {
+                out.push_str("\\\\");
+                i += 1;
+            }
+            b'|' => {
+                out.push_str("\\|");
+                i += 1;
+            }
+            b'\n' => {
+                out.push_str("\\n");
+                i += 1;
+            }
+            b'\r' => {
+                out.push_str("\\r");
+                i += 1;
+            }
+            b'\t' => {
+                out.push_str("\\t");
+                i += 1;
+            }
+            b if b < 0x20 || b == 0x7f => {
+                push_octal(&mut out, b);
+                i += 1;
+            }
+            b if b < 0x80 => {
+                out.push(b as char);
+                i += 1;
+            }
+            _ => {
+                let width = utf8_len(raw[i]);
+                if width > 1
+                    && i + width <= raw.len()
+                    && std::str::from_utf8(&raw[i..i + width]).is_ok()
+                {
+                    out.push_str(std::str::from_utf8(&raw[i..i + width]).unwrap());
+                    i += width;
+                } else {
+                    push_octal(&mut out, raw[i]);
+                    i += 1;
+                }
+            }
+        }
+    }
+    out
+}
+
+fn push_octal(out: &mut String, b: u8) {
+    out.push('\\');
+    out.push(char::from(b'0' + (b >> 6)));
+    out.push(char::from(b'0' + ((b >> 3) & 7)));
+    out.push(char::from(b'0' + (b & 7)));
+}
+
+fn utf8_len(b: u8) -> usize {
+    match b {
+        0xC2..=0xDF => 2,
+        0xE0..=0xEF => 3,
+        0xF0..=0xF4 => 4,
+        _ => 0,
+    }
 }
 
 fn dash(cell: &str) -> bool {
@@ -685,47 +843,53 @@ fn selected_heads(
     include: &[String],
     exclude: &[String],
 ) -> Result<Vec<Head>, String> {
-    let out = gitutil::git(
-        repo,
-        &[
-            "for-each-ref",
-            "--format=%(objectname)%00%(refname)",
-            "--end-of-options",
-            "refs/heads",
-        ],
-    );
+    let args = [
+        OsStr::new("for-each-ref"),
+        OsStr::new("--format=%(objectname)%00%(refname)"),
+        OsStr::new("--end-of-options"),
+        OsStr::new("refs/heads"),
+    ];
+    let out = gitutil::git_raw(repo, &args);
     if out.status != 0 {
-        return Err(format!("for-each-ref: {}", out.stderr.trim()));
+        return Err(format!("for-each-ref: {}", stderr_text(&out.stderr)));
+    }
+    let mut stdout = out.stdout;
+    while stdout.last().is_some_and(|b| *b == b'\n' || *b == b'\r') {
+        stdout.pop();
     }
     let mut heads = Vec::new();
-    let text = out.stdout.trim_end_matches(['\r', '\n']);
-    for line in text.split('\n') {
-        if line.is_empty() {
-            continue;
+    if !stdout.is_empty() {
+        for line in stdout.split(|b| *b == b'\n') {
+            if line.is_empty() {
+                continue;
+            }
+            let Some(nul) = line.iter().position(|b| *b == 0) else {
+                return Err("head line is not a sha and a ref".into());
+            };
+            let (sha, name) = (&line[..nul], &line[nul + 1..]);
+            if !name.starts_with(b"refs/heads/") {
+                continue;
+            }
+            if sha.len() != 40 || !sha.iter().all(u8::is_ascii_hexdigit) {
+                return Err(format!("head {} is not a commit sha", escape_cell(name)));
+            }
+            if !wanted(short_of(name), trunk, include, exclude) {
+                continue;
+            }
+            let sha = std::str::from_utf8(sha)
+                .map_err(|_| format!("head {} is not a commit sha", escape_cell(name)))?;
+            heads.push(Head {
+                name: name.to_vec(),
+                sha: sha.to_string(),
+            });
         }
-        let Some((sha, name)) = line.split_once('\0') else {
-            return Err(format!("head line is not a sha and a ref: {line}"));
-        };
-        if !name.starts_with("refs/heads/") {
-            continue;
-        }
-        if sha.len() != 40 || !sha.chars().all(|c| c.is_ascii_hexdigit()) {
-            return Err(format!("head {name} is not a commit sha"));
-        }
-        if !wanted(short_of(name), trunk, include, exclude) {
-            continue;
-        }
-        heads.push(Head {
-            name: name.to_string(),
-            sha: sha.to_string(),
-        });
     }
     heads.sort_by(|a, b| a.name.cmp(&b.name));
     Ok(heads)
 }
 
-fn wanted(name: &str, trunk: &str, include: &[String], exclude: &[String]) -> bool {
-    if name == trunk {
+fn wanted(name: &[u8], trunk: &str, include: &[String], exclude: &[String]) -> bool {
+    if name == trunk.as_bytes() {
         return true;
     }
     if !include.is_empty() && !include.iter().any(|pat| glob_match(pat, name)) {
@@ -734,34 +898,54 @@ fn wanted(name: &str, trunk: &str, include: &[String], exclude: &[String]) -> bo
     !exclude.iter().any(|pat| glob_match(pat, name))
 }
 
-fn name_ok(name: &str) -> bool {
-    !name.is_empty() && !name.contains(['|', ' ', '\n', '\r', '\t']) && !name.contains(':')
+fn name_ok(name: &[u8]) -> bool {
+    !name.is_empty()
+        && !name.contains(&b' ')
+        && !name.contains(&b'\n')
+        && !name.contains(&b'\r')
+        && !name.contains(&b'\t')
+        && !name.contains(&b':')
 }
 
-fn short_of(name: &str) -> &str {
-    name.strip_prefix("refs/heads/").unwrap_or(name)
+fn short_of(name: &[u8]) -> &[u8] {
+    name.strip_prefix(b"refs/heads/").unwrap_or(name)
 }
 
-fn head_ref(name: &str) -> String {
-    if name.starts_with("refs/") {
-        name.to_string()
+fn head_ref(name: &[u8]) -> Vec<u8> {
+    if name.starts_with(b"refs/") {
+        name.to_vec()
     } else {
-        format!("refs/heads/{name}")
+        let mut full = Vec::with_capacity(b"refs/heads/".len() + name.len());
+        full.extend_from_slice(b"refs/heads/");
+        full.extend_from_slice(name);
+        full
     }
 }
 
 fn snapshot(heads: &[Head]) -> String {
-    let mut lines: Vec<String> = heads
-        .iter()
-        .map(|h| format!("{} {}", h.name, h.sha))
-        .collect();
-    lines.sort();
+    let mut order: Vec<&Head> = heads.iter().collect();
+    order.sort_by(|a, b| a.name.cmp(&b.name).then(a.sha.cmp(&b.sha)));
     let mut hasher = Sha256::new();
-    for line in &lines {
-        hasher.update(line.as_bytes());
+    for head in order {
+        hasher.update(&head.name);
+        hasher.update(b" ");
+        hasher.update(head.sha.as_bytes());
         hasher.update(b"\n");
     }
     format!("sha256:{}", hex(&hasher.finalize()))
+}
+
+fn stderr_text(bytes: &[u8]) -> String {
+    String::from_utf8_lossy(bytes)
+        .trim_matches([' ', '\t', '\n', '\r'])
+        .to_string()
+}
+
+fn git_ref(repo: &Path, args: &[&str], spec: &[u8]) -> gitutil::GitRaw {
+    let spec = OsStr::from_bytes(spec);
+    let mut all: Vec<&OsStr> = args.iter().copied().map(OsStr::new).collect();
+    all.push(spec);
+    gitutil::git_raw(repo, &all)
 }
 
 fn merge_base(repo: &Path, left: &str, right: &str) -> Result<Option<String>, String> {
@@ -935,24 +1119,40 @@ fn merge_outcome(repo: &Path, trunk: &str, branch: &str) -> Result<Merge, String
     })
 }
 
-fn branch_exists(repo: &Path, branch: &str) -> Result<bool, String> {
+fn branch_exists(repo: &Path, branch: &[u8]) -> Result<bool, String> {
     let spec = head_ref(branch);
-    let out = gitutil::git(
+    let out = git_ref(
         repo,
-        &[
-            "rev-parse",
-            "--verify",
-            "--quiet",
-            "--end-of-options",
-            &spec,
-        ],
+        &["rev-parse", "--verify", "--quiet", "--end-of-options"],
+        &spec,
     );
     Ok(out.status == 0)
 }
 
-fn live_sha(repo: &Path, branch: &str) -> Result<String, String> {
+fn live_sha(repo: &Path, branch: &[u8]) -> Result<String, String> {
     let spec = head_ref(branch);
-    git_ok(repo, &["rev-parse", "--verify", "--end-of-options", &spec])
+    let out = git_ref(repo, &["rev-parse", "--verify", "--end-of-options"], &spec);
+    if out.status != 0 {
+        return Err(format!("rev-parse: {}", stderr_text(&out.stderr)));
+    }
+    let sha = trim_ascii(&out.stdout);
+    let sha = std::str::from_utf8(sha).map_err(|_| "rev-parse sha is not utf-8".to_string())?;
+    if sha.len() != 40 || !sha.bytes().all(|c| c.is_ascii_hexdigit()) {
+        return Err("rev-parse sha".into());
+    }
+    Ok(sha.to_string())
+}
+
+fn trim_ascii(bytes: &[u8]) -> &[u8] {
+    let mut start = 0;
+    let mut end = bytes.len();
+    while start < end && matches!(bytes[start], b' ' | b'\t' | b'\n' | b'\r') {
+        start += 1;
+    }
+    while end > start && matches!(bytes[end - 1], b' ' | b'\t' | b'\n' | b'\r') {
+        end -= 1;
+    }
+    &bytes[start..end]
 }
 
 fn locate(repo: &Path) -> Result<PathBuf, String> {
@@ -1057,8 +1257,8 @@ fn spawn(mut cmd: Command, stdin: Option<&[u8]>) -> Result<Out, String> {
     })
 }
 
-fn glob_match(pat: &str, text: &str) -> bool {
-    glob_rec(pat.as_bytes(), text.as_bytes())
+fn glob_match(pat: &str, text: &[u8]) -> bool {
+    glob_rec(pat.as_bytes(), text)
 }
 
 fn glob_rec(pat: &[u8], text: &[u8]) -> bool {
