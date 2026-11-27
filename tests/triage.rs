@@ -514,7 +514,7 @@ fn p21_fixture_grades_match_labels() {
     let span = plan.rows.get("refs/heads/grade/open/dates").unwrap();
     assert_eq!(
         span.get("author_old").map(String::as_str),
-        Some("2020-01-02T00:00:00+00:00")
+        Some("2020-01-02T00:00:00Z")
     );
     assert_eq!(
         span.get("author_new").map(String::as_str),

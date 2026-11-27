@@ -1014,9 +1014,27 @@ fn parse_stamps(text: &str) -> Result<Vec<(i64, String)>, String> {
         let epoch = epoch
             .parse::<i64>()
             .map_err(|_| format!("author date {line}"))?;
-        out.push((epoch, display.to_string()));
+        out.push((epoch, canonical_stamp(display)));
     }
     Ok(out)
+}
+
+/// One RFC 3339 spelling for a stamp read from git.
+///
+/// `%aI` is strict ISO 8601. Git before 2.45 writes a zero offset as
+/// `+00:00`; Git 2.45 and later write `Z`, which is the form ISO
+/// 8601-1:2020 and the `time` crate's `Rfc3339` formatter use. Other
+/// offsets stay `±HH:MM`.
+fn canonical_stamp(display: &str) -> String {
+    let head = display
+        .strip_suffix("+00:00")
+        .or_else(|| display.strip_suffix("-00:00"))
+        .or_else(|| display.strip_suffix('Z'))
+        .or_else(|| display.strip_suffix('z'));
+    match head {
+        Some(head) => format!("{head}Z"),
+        None => display.to_string(),
+    }
 }
 
 fn cherry(repo: &Path, trunk: &str, branch: &str) -> Result<Vec<Cherry>, String> {
