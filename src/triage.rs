@@ -8,6 +8,7 @@
 //! on it. ORDER lists parents first, which is the land sequence.
 //! Rows use full ref names. Git commands take the commit sha.
 //! `triage verify` re-reads that ref and re-runs each DROP check.
+//! It rejects an ORDER that lists a parent after its child.
 
 use crate::gitutil;
 use clap::Parser;
@@ -90,7 +91,7 @@ struct Head {
 
 struct Ctx<'a> {
     repo: &'a Path,
-    trunk: &'a str,
+    trunk_ref: &'a [u8],
     trunk_sha: &'a str,
     trunk_tree: &'a str,
 }
@@ -163,7 +164,13 @@ struct DropRow {
 }
 
 pub fn run() -> i32 {
-    let args: Vec<String> = std::env::args().skip(1).collect();
+    let args = match utf8_args(1) {
+        Ok(args) => args,
+        Err(err) => {
+            eprintln!("triage: {err}");
+            return 1;
+        }
+    };
     let rest: &[String] = if args.first().map(String::as_str) == Some("triage") {
         &args[1..]
     } else {
@@ -182,6 +189,17 @@ pub fn run() -> i32 {
     finish(plan(&cli))
 }
 
+fn utf8_args(skip: usize) -> Result<Vec<String>, String> {
+    let mut out = Vec::new();
+    for arg in std::env::args_os().skip(skip) {
+        match arg.to_str() {
+            Some(text) => out.push(text.to_string()),
+            None => return Err("argument is not utf-8".into()),
+        }
+    }
+    Ok(out)
+}
+
 fn finish(result: Result<(), String>) -> i32 {
     match result {
         Ok(()) => 0,
@@ -194,9 +212,11 @@ fn finish(result: Result<(), String>) -> i32 {
 
 fn plan(cli: &TriageCli) -> Result<(), String> {
     let repo = locate(&cli.repo)?;
+    require_full_history(&repo)?;
     let scratch = scratch_dir()?;
     let bare = scratch.path.join("bare.git");
     clone_bare(&repo, &bare)?;
+    let trunk_ref = trunk_ref(&bare, &cli.trunk, &cli.remote)?;
     let trunk_sha = trunk_tip(&bare, &cli.trunk, &cli.remote)?;
     let trunk_tree = git_ok(
         &bare,
@@ -207,17 +227,14 @@ fn plan(cli: &TriageCli) -> Result<(), String> {
             &format!("{trunk_sha}^{{tree}}"),
         ],
     )?;
-    let heads = selected_heads(&bare, &cli.trunk, &cli.include, &cli.exclude)?;
-    if !heads
-        .iter()
-        .any(|h| short_of(&h.name) == cli.trunk.as_bytes())
-    {
+    let heads = selected_heads(&bare, &trunk_ref, &cli.include, &cli.exclude)?;
+    if !heads.iter().any(|h| h.name == trunk_ref) {
         return Err(format!("trunk {} is not a head", cli.trunk));
     }
     let snap = snapshot(&heads);
     let ctx = Ctx {
         repo: &bare,
-        trunk: &cli.trunk,
+        trunk_ref: &trunk_ref,
         trunk_sha: &trunk_sha,
         trunk_tree: &trunk_tree,
     };
@@ -225,8 +242,7 @@ fn plan(cli: &TriageCli) -> Result<(), String> {
     let mut patches = PatchCache::new();
     for head in &heads {
         let short = short_of(&head.name);
-        let kept =
-            short == cli.trunk.as_bytes() || cli.keep.iter().any(|pat| glob_match(pat, short));
+        let kept = head.name == trunk_ref || cli.keep.iter().any(|pat| glob_match(pat, short));
         rows.push(classify(&ctx, head, kept, &mut patches)?);
     }
     let land = land_plan(&bare, &rows)?;
@@ -255,9 +271,11 @@ fn plan(cli: &TriageCli) -> Result<(), String> {
 fn verify(path: &Path) -> Result<(), String> {
     let text = fs::read_to_string(path).map_err(|e| format!("bad plan: {e}"))?;
     let (repo, trunk, remote, drops) = parse_drops(&text)?;
+    require_full_history(&repo)?;
     let scratch = scratch_dir()?;
     let bare = scratch.path.join("bare.git");
     clone_bare(&repo, &bare)?;
+    let trunk_ref = trunk_ref(&bare, &trunk, &remote)?;
     let trunk_sha = trunk_tip(&bare, &trunk, &remote)?;
     let trunk_tree = git_ok(
         &bare,
@@ -270,7 +288,7 @@ fn verify(path: &Path) -> Result<(), String> {
     )?;
     let ctx = Ctx {
         repo: &bare,
-        trunk: &trunk,
+        trunk_ref: &trunk_ref,
         trunk_sha: &trunk_sha,
         trunk_tree: &trunk_tree,
     };
@@ -294,6 +312,7 @@ fn verify(path: &Path) -> Result<(), String> {
             failed.push(format!("drop does not hold: {}", escape_cell(&row.branch)));
         }
     }
+    order_holds(&bare, &text, &mut failed)?;
     if failed.is_empty() {
         Ok(())
     } else {
@@ -432,7 +451,7 @@ fn decide(
     patches: &mut PatchCache,
 ) -> Result<Decision, String> {
     if kept {
-        let reason = if short_of(&head.name) == ctx.trunk.as_bytes() {
+        let reason = if head.name == ctx.trunk_ref {
             "trunk"
         } else {
             "keep"
@@ -699,6 +718,58 @@ fn parse_drops(text: &str) -> Result<(PathBuf, String, String, Vec<DropRow>), St
     Ok((PathBuf::from(repo), trunk, remote, drops))
 }
 
+fn parse_order(text: &str) -> Result<Vec<Vec<u8>>, String> {
+    let mut section = String::new();
+    let mut refs = Vec::new();
+    for line in text.lines() {
+        if let Some(title) = line.strip_prefix("* ") {
+            section = title.trim().to_string();
+            continue;
+        }
+        if section != "ORDER" || line.is_empty() {
+            continue;
+        }
+        let Some((_, rest)) = line.split_once(". ") else {
+            continue;
+        };
+        // ASCII space only. U+00A0 is a legal byte in a ref name.
+        let mut parts = rest.split(' ').filter(|part| !part.is_empty());
+        let Some(_verb) = parts.next() else {
+            continue;
+        };
+        let Some(branch) = parts.next() else {
+            continue;
+        };
+        refs.push(unescape_cell(branch)?);
+    }
+    Ok(refs)
+}
+
+fn order_holds(repo: &Path, text: &str, failed: &mut Vec<String>) -> Result<(), String> {
+    let order = parse_order(text)?;
+    let mut tips = Vec::with_capacity(order.len());
+    for branch in order {
+        let full = head_ref(&branch);
+        if !branch_exists(repo, &full)? {
+            failed.push(format!("order does not hold: {}", escape_cell(&branch)));
+            continue;
+        }
+        tips.push((branch, live_sha(repo, &full)?));
+    }
+    for i in 0..tips.len() {
+        for j in (i + 1)..tips.len() {
+            if gitutil::strict_ancestor(repo, &tips[j].1, &tips[i].1) {
+                failed.push(format!(
+                    "order puts {} after {}",
+                    escape_cell(&tips[j].0),
+                    escape_cell(&tips[i].0)
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 fn cells(line: &str) -> Vec<String> {
     let bytes = line.as_bytes();
     let mut out = Vec::new();
@@ -879,12 +950,18 @@ fn dash(cell: &str) -> bool {
 
 fn selected_heads(
     repo: &Path,
-    trunk: &str,
+    trunk_ref: &[u8],
     include: &[String],
     exclude: &[String],
 ) -> Result<Vec<Head>, String> {
-    let mut heads = list_heads(repo, "refs/heads", trunk, include, exclude)?;
-    heads.extend(list_heads(repo, "refs/remotes", trunk, include, exclude)?);
+    let mut heads = list_heads(repo, "refs/heads", trunk_ref, include, exclude)?;
+    heads.extend(list_heads(
+        repo,
+        "refs/remotes",
+        trunk_ref,
+        include,
+        exclude,
+    )?);
     heads.sort_by(|a, b| a.name.cmp(&b.name));
     heads.dedup_by(|a, b| a.name == b.name);
     Ok(heads)
@@ -893,7 +970,7 @@ fn selected_heads(
 fn list_heads(
     repo: &Path,
     prefix: &str,
-    trunk: &str,
+    trunk_ref: &[u8],
     include: &[String],
     exclude: &[String],
 ) -> Result<Vec<Head>, String> {
@@ -933,7 +1010,7 @@ fn list_heads(
         if sha.len() != 40 || !sha.iter().all(u8::is_ascii_hexdigit) {
             return Err(format!("head {} is not a commit sha", escape_cell(name)));
         }
-        if !wanted(short_of(name), trunk, include, exclude) {
+        if !wanted(name, trunk_ref, include, exclude) {
             continue;
         }
         let sha = std::str::from_utf8(sha)
@@ -957,10 +1034,11 @@ fn remote_head_symref(name: &[u8]) -> bool {
     &rest[slash + 1..] == b"HEAD"
 }
 
-fn wanted(name: &[u8], trunk: &str, include: &[String], exclude: &[String]) -> bool {
-    if name == trunk.as_bytes() {
+fn wanted(full: &[u8], trunk_ref: &[u8], include: &[String], exclude: &[String]) -> bool {
+    if full == trunk_ref {
         return true;
     }
+    let name = short_of(full);
     if !include.is_empty() && !include.iter().any(|pat| glob_match(pat, name)) {
         return false;
     }
@@ -1315,7 +1393,57 @@ fn copy_remotes(src: &Path, dst: &Path) -> Result<(), String> {
     if out.status != 0 {
         return Err(format!("fetch remotes: {}", out.stderr.trim()));
     }
+    // git fetch exits 0 when it refuses a shallow-root update.
+    let mut rejected = rejected_refs(&out.stderr);
+    for name in rejected_refs(&out.stdout) {
+        if !rejected.contains(&name) {
+            rejected.push(name);
+        }
+    }
+    if !rejected.is_empty() {
+        return Err(format!(
+            "fetch rejected {}; git fetch --unshallow",
+            rejected.join(", ")
+        ));
+    }
     Ok(())
+}
+
+fn rejected_refs(text: &str) -> Vec<String> {
+    let mut refs = Vec::new();
+    for line in text.lines() {
+        let line = line.trim();
+        let Some(rest) = line.strip_prefix("warning: rejected ") else {
+            continue;
+        };
+        let Some(name) = rest.split_whitespace().next() else {
+            continue;
+        };
+        if !name.is_empty() && !refs.iter().any(|have| have == name) {
+            refs.push(name.to_string());
+        }
+    }
+    refs
+}
+
+fn require_full_history(repo: &Path) -> Result<(), String> {
+    let out = gitutil::git(repo, &["rev-parse", "--is-shallow-repository"]);
+    if out.status == 0 && out.stdout.trim() == "true" {
+        return Err("shallow repository; git fetch --unshallow".into());
+    }
+    Ok(())
+}
+
+fn trunk_ref(repo: &Path, trunk: &str, remote: &str) -> Result<Vec<u8>, String> {
+    let local = format!("refs/heads/{trunk}");
+    if verify_ref(repo, &local).is_some() {
+        return Ok(local.into_bytes());
+    }
+    let via = format!("refs/remotes/{remote}/{trunk}");
+    if verify_ref(repo, &via).is_some() {
+        return Ok(via.into_bytes());
+    }
+    Err(format!("trunk {trunk} is not a head"))
 }
 
 fn trunk_tip(repo: &Path, trunk: &str, remote: &str) -> Result<String, String> {
@@ -1675,6 +1803,7 @@ fn topo(imm: &[Vec<usize>], keys: &[(u8, i64, Vec<u8>)]) -> Vec<usize> {
     }
     let key = |i: usize| (keys[i].0, keys[i].1, keys[i].2.clone(), i);
     let mut ready: BTreeSet<(u8, i64, Vec<u8>, usize)> = BTreeSet::new();
+    #[allow(clippy::needless_range_loop)]
     for i in 0..n {
         if indeg[i] == 0 {
             ready.insert(key(i));
@@ -1763,6 +1892,7 @@ fn stack_tree(
     (buf, stacks)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn emit_stack(
     local: usize,
     depth: usize,

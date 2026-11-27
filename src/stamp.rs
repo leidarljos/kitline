@@ -31,7 +31,13 @@ struct TrackCli {
 
 pub fn run_stamp() -> i32 {
     let mut argv = vec!["kitline stamp".to_string()];
-    argv.extend(std::env::args().skip(2));
+    match utf8_args(2) {
+        Ok(rest) => argv.extend(rest),
+        Err(err) => {
+            eprintln!("stamp: {err}");
+            return 1;
+        }
+    }
     let cli = StampCli::parse_from(argv);
     match stamped(&cli) {
         Ok(text) => {
@@ -51,7 +57,13 @@ pub fn run_stamp() -> i32 {
 
 pub fn run_track() -> i32 {
     let mut argv = vec!["kitline track".to_string()];
-    argv.extend(std::env::args().skip(2));
+    match utf8_args(2) {
+        Ok(rest) => argv.extend(rest),
+        Err(err) => {
+            eprintln!("track: {err}");
+            return 1;
+        }
+    }
     let cli = TrackCli::parse_from(argv);
     let repo = cli.repo.unwrap_or_else(|| PathBuf::from("."));
     let rev = cli.rev.unwrap_or_else(|| "HEAD".to_string());
@@ -74,6 +86,17 @@ pub fn run_track() -> i32 {
             1
         }
     }
+}
+
+fn utf8_args(skip: usize) -> Result<Vec<String>, String> {
+    let mut out = Vec::new();
+    for arg in std::env::args_os().skip(skip) {
+        match arg.to_str() {
+            Some(text) => out.push(text.to_string()),
+            None => return Err("argument is not utf-8".into()),
+        }
+    }
+    Ok(out)
 }
 
 fn stamped(cli: &StampCli) -> Result<String, String> {

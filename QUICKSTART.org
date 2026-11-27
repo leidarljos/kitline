@@ -11,10 +11,19 @@ kitline triage /tmp/ljos.git --trunk main --out plan.org
 plan.org has DROP, STACKS, and ORDER. Parents land before children.
 
 #+begin_src sh
-kitline stamp -m "subject line"
+rm -rf /tmp/kitline-qs
+git init -b main /tmp/kitline-qs
+cd /tmp/kitline-qs
+git config user.email rgoswami@ieee.org
+git config user.name "Rohit Goswami"
+git config commit.gpgsign false
+git commit --allow-empty -m "init"
+kitline triage . --trunk main --out plan.org
+kitline stamp -m "subject line" > msg.txt
+git commit --allow-empty -F msg.txt
 kitline track HEAD
 kitline triage verify plan.org
 #+end_src
 
-stamp prints a message carrying Kitline-Change. track prints that id.
-verify re-checks every DROP row.
+stamp prints a message carrying Kitline-Change. Commit that message, then
+track prints the id. verify re-checks every DROP row.

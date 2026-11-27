@@ -21,18 +21,22 @@ stamp prints a message carrying Kitline-Change. track prints that id.
 ";
 
 pub fn run() -> i32 {
-    let mut args = std::env::args().skip(1);
-    match args.next().as_deref() {
-        Some("triage") => triage::run(),
-        Some("stamp") => stamp::run_stamp(),
-        Some("track") => stamp::run_track(),
-        Some("-h") | Some("--help") | Some("help") => {
+    let mut args = std::env::args_os().skip(1);
+    let Some(first) = args.next() else {
+        eprint!("{HELP}");
+        return 2;
+    };
+    let Some(first) = first.to_str() else {
+        eprintln!("kitline: argument is not utf-8");
+        return 1;
+    };
+    match first {
+        "triage" => triage::run(),
+        "stamp" => stamp::run_stamp(),
+        "track" => stamp::run_track(),
+        "-h" | "--help" | "help" => {
             print!("{HELP}");
             0
-        }
-        None => {
-            eprint!("{HELP}");
-            2
         }
         _ => plan::run(),
     }
