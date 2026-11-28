@@ -14,6 +14,7 @@ kitline grades a pile of branches and stamps a change.
   kitline stamp [-m TEXT | -F FILE]
   kitline track [REV] [--repo PATH]
   kitline --workspace FILE --report FILE --script FILE
+  kitline --version
 
 triage writes plan.org. DROP is already upstream. STACKS groups the
 rest. ORDER lists them parent before child.
@@ -36,6 +37,10 @@ pub fn run() -> i32 {
         "track" => stamp::run_track(),
         "-h" | "--help" | "help" => {
             print!("{HELP}");
+            0
+        }
+        "-V" | "--version" => {
+            println!("kitline {}", env!("CARGO_PKG_VERSION"));
             0
         }
         _ => plan::run(),
