@@ -5,6 +5,10 @@
 
 Triage, stamp, and track are the commands a bot runs. See QUICKSTART.org.
 
+One command installs a prebuilt kitline: curl -fsSL https://github.com/leidarljos/kitline/releases/latest/download/install.sh | sh.
+The script checks SHA256SUMS, then copies the binary to $HOME/.local/bin.
+Set KITLINE_INSTALL_DIR to choose a different directory.
+
 kitline reads one TOML (Tom's Obvious Minimal Language) workspace.
 It writes an org report and a POSIX sh script.
 The script lists the commands for nodes that are ready to merge.

@@ -1,6 +1,10 @@
 #+title: kitline quickstart
 #+options: toc:nil num:nil ^:{}
 
+One command installs a prebuilt kitline: curl -fsSL https://github.com/leidarljos/kitline/releases/latest/download/install.sh | sh.
+The script checks SHA256SUMS, then copies the binary to $HOME/.local/bin.
+Set KITLINE_INSTALL_DIR to choose a different directory.
+
 A bare clone, then a plan. kitline does not push.
 
 #+begin_src sh

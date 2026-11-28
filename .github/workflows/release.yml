@@ -1,0 +1,111 @@
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            target: x86_64-unknown-linux-musl
+          - os: ubuntu-22.04-arm
+            target: aarch64-unknown-linux-musl
+          - os: macos-latest
+            target: x86_64-apple-darwin
+          - os: macos-latest
+            target: aarch64-apple-darwin
+    runs-on: ${{ matrix.os }}
+    env:
+      TARGET: ${{ matrix.target }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Read the pinned toolchain
+        id: pin
+        run: |
+          set -eu
+          : "${GITHUB_OUTPUT:?}"
+          channel=$(sed -n 's/^channel *= *"\(.*\)"/\1/p' rust-toolchain.toml)
+          test -n "$channel"
+          echo "channel=$channel" >> "$GITHUB_OUTPUT"
+
+      - uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc
+        with:
+          toolchain: ${{ steps.pin.outputs.channel }}
+          targets: ${{ matrix.target }}
+
+      # ring (via deedar) compiles C. cc-rs needs musl-gcc named for the target.
+      - name: musl C toolchain
+        if: runner.os == 'Linux'
+        run: |
+          set -eu
+          : "${GITHUB_ENV:?}"
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends musl-tools
+          lower=$(printf '%s' "$TARGET" | tr '-' '_')
+          upper=$(printf '%s' "$lower" | tr '[:lower:]' '[:upper:]')
+          echo "CC_${lower}=musl-gcc" >> "$GITHUB_ENV"
+          echo "CARGO_TARGET_${upper}_LINKER=musl-gcc" >> "$GITHUB_ENV"
+
+      - name: Build
+        run: |
+          set -eu
+          : "${RUNNER_TEMP:?}"
+          cargo build --locked --release --target "$TARGET" -p kitline
+          install -m 0755 "target/${TARGET}/release/kitline" "$RUNNER_TEMP/kitline-${TARGET}"
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: ${{ matrix.target }}
+          path: ${{ runner.temp }}/kitline-${{ matrix.target }}
+          if-no-files-found: error
+
+  publish:
+    needs: build
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: SHA256SUMS and install.sh
+        run: |
+          set -eu
+          channel=$(sed -n 's/^channel *= *"\(.*\)"/\1/p' rust-toolchain.toml)
+          grep -qx "PIN=$channel" install.sh
+          cp install.sh dist/install.sh
+          chmod 0755 dist/install.sh
+          cd dist
+          test -f kitline-x86_64-unknown-linux-musl
+          test -f kitline-aarch64-unknown-linux-musl
+          test -f kitline-x86_64-apple-darwin
+          test -f kitline-aarch64-apple-darwin
+          sha256sum \
+            kitline-aarch64-apple-darwin \
+            kitline-aarch64-unknown-linux-musl \
+            kitline-x86_64-apple-darwin \
+            kitline-x86_64-unknown-linux-musl \
+            install.sh \
+            > SHA256SUMS
+
+      - uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          fail_on_unmatched_files: true
+          files: |
+            dist/kitline-*
+            dist/install.sh
+            dist/SHA256SUMS
