@@ -42,18 +42,19 @@ jobs:
           toolchain: ${{ steps.pin.outputs.channel }}
           targets: ${{ matrix.target }}
 
-      # ring (via deedar) compiles C. cc-rs needs musl-gcc named for the target.
-      - name: musl C toolchain
+      # ring (via deedar) compiles C, so cc-rs gets musl-gcc for the target.
+      # rustc links the musl target. ubuntu-22.04 ships musl 1.2.2, whose
+      # *link spec is `-dynamic-linker` and `%{static:-static}`.
+      - name: musl C toolchain (C compiler only; rustc links itself)
         if: runner.os == 'Linux'
         run: |
           set -eu
           : "${GITHUB_ENV:?}"
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends musl-tools
+          sudo apt-get install -y --no-install-recommends musl-tools file
           lower=$(printf '%s' "$TARGET" | tr '-' '_')
-          upper=$(printf '%s' "$lower" | tr '[:lower:]' '[:upper:]')
           echo "CC_${lower}=musl-gcc" >> "$GITHUB_ENV"
-          echo "CARGO_TARGET_${upper}_LINKER=musl-gcc" >> "$GITHUB_ENV"
+          echo "RUSTFLAGS=-C target-feature=+crt-static" >> "$GITHUB_ENV"
 
       - name: Build
         run: |
@@ -61,6 +62,30 @@ jobs:
           : "${RUNNER_TEMP:?}"
           cargo build --locked --release --target "$TARGET" -p kitline
           install -m 0755 "target/${TARGET}/release/kitline" "$RUNNER_TEMP/kitline-${TARGET}"
+
+      # `!` is exempt from `set -e`, so a match has to `exit 1` itself.
+      - name: Linux asset is static and runs on this glibc runner
+        if: runner.os == 'Linux'
+        run: |
+          set -eu
+          b="$RUNNER_TEMP/kitline-${TARGET}"
+          file "$b"
+          file "$b" | grep -Eq 'static-pie linked|statically linked'
+          hdr=$(readelf -lW "$b")
+          dyn=$(readelf -dW "$b")
+          case "$hdr" in
+            *'Requesting program interpreter'*)
+              printf '%s\n' "INTERP" >&2
+              exit 1
+              ;;
+          esac
+          case "$dyn" in
+            *'(NEEDED)'*)
+              printf '%s\n' "NEEDED" >&2
+              exit 1
+              ;;
+          esac
+          "$b" --version
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
